@@ -218,7 +218,7 @@ check_git_state() {
     fail "local Mobius state is visible to git status --ignored=no"
   fi
 
-  if ! git -C "$REPO_ROOT" check-ignore -q .mobius; then
+  if ! git -C "$REPO_ROOT" check-ignore -q .mobius/probe; then
     fail ".mobius is not ignored by git"
   fi
 }

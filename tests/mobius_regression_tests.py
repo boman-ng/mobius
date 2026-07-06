@@ -2569,7 +2569,7 @@ def test_public_docs_skills_and_verify_surface() -> None:
     assert "release_text_paths" in verify
     assert "mobius_cv_mcp_server.sh\" --self-check" in verify
     assert "hook-health" in verify
-    assert "git -C \"$REPO_ROOT\" check-ignore -q .mobius" in verify
+    assert "git -C \"$REPO_ROOT\" check-ignore -q .mobius/probe" in verify
 
 
 def test_mcp_launcher_self_check() -> None:
