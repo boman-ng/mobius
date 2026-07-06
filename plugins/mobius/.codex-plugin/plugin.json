@@ -4,10 +4,10 @@
   "description": "Local-only opt-in plan and loop gates for explicit Mobius goals.",
   "author": {
     "name": "Mobius contributors",
-    "url": "https://github.com/boman-ngs"
+    "url": "https://github.com/boman-ng"
   },
-  "homepage": "https://github.com/boman-ngs/mobius#readme",
-  "repository": "https://github.com/boman-ngs/mobius",
+  "homepage": "https://github.com/boman-ng/mobius#readme",
+  "repository": "https://github.com/boman-ng/mobius",
   "license": "Apache-2.0",
   "keywords": [
     "codex",
@@ -26,7 +26,7 @@
       "Write",
       "Review"
     ],
-    "websiteURL": "https://github.com/boman-ngs/mobius",
+    "websiteURL": "https://github.com/boman-ng/mobius",
     "defaultPrompt": [
       "Create and lock a Mobius goal contract.",
       "Run a locked Mobius goal through the full loop."

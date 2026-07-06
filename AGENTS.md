@@ -41,9 +41,9 @@ documentation in the same change when the public contract changes.
 
 ## Release Contract
 
-- Public repository coordinates are `boman-ngs/mobius`.
+- Public repository coordinates are `boman-ng/mobius`.
 - The plugin name is `mobius`; keep the marketplace entry and manifest aligned.
-- Keep release URLs under `https://github.com/boman-ngs/mobius`.
+- Keep release URLs under `https://github.com/boman-ng/mobius`.
 - Do not commit personal usernames, personal home paths, local cache paths, machine-specific
   absolute paths, generated virtual environments, bytecode, or local Mobius ledger state.
 - `.mobius/` is project-local execution evidence and must remain ignored by Git.

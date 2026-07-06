@@ -40,7 +40,7 @@ from pathlib import Path
 
 repo = Path(sys.argv[1])
 plugin = Path(sys.argv[2])
-expected_owner = "boman-ngs"
+expected_owner = "boman-ng"
 expected_slug = f"{expected_owner}/mobius"
 expected_author_url = f"https://github.com/{expected_owner}"
 expected_repo_url = f"https://github.com/{expected_slug}"

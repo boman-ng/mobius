@@ -2560,7 +2560,7 @@ def test_public_docs_skills_and_verify_surface() -> None:
     assert re.search(r"/home/[A-Za-z0-9_.-]+", verify) is None
     assert re.search(r"/Users/[A-Za-z0-9_.-]+", verify) is None
     assert re.search(r"C:\\Users\\[A-Za-z0-9_.-]+", verify) is None
-    assert 'expected_owner = "boman-ngs"' in verify
+    assert 'expected_owner = "boman-ng"' in verify
     assert 'expected_slug = f"{expected_owner}/mobius"' in verify
     assert "PYTHONPYCACHEPREFIX" in verify
     assert "validate_bundle" in verify

@@ -26,7 +26,7 @@ confidence. It does not send project state to a hosted Mobius service.
 Add the repository marketplace, then install the plugin:
 
 ```bash
-codex plugin marketplace add boman-ngs/mobius --ref v0.1.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
+codex plugin marketplace add boman-ng/mobius --ref v0.1.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
 codex plugin add mobius@mobius
 ```
 

@@ -39,7 +39,7 @@ git push origin v0.1.0
 Install from the pinned tag:
 
 ```bash
-codex plugin marketplace add boman-ngs/mobius --ref v0.1.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
+codex plugin marketplace add boman-ng/mobius --ref v0.1.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
 codex plugin add mobius@mobius
 ```
 
