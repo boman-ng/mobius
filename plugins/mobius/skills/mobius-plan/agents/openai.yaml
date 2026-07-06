@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mobius Plan"
+  short_description: "Create explicit Mobius goal contracts"
+  default_prompt: "Create a Mobius goal and acceptance matrix."

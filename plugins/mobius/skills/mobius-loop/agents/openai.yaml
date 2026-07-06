@@ -1,0 +1,11 @@
+interface:
+  display_name: "Mobius Loop"
+  short_description: "Run one explicit Mobius goal stage."
+  default_prompt: "Run the next Mobius plan stage through review."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mobius-cv"
+      description: "MobiusCV recorded review MCP server"
+      transport: "stdio"

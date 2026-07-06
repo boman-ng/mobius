@@ -1,0 +1,37 @@
+{
+  "name": "mobius",
+  "version": "0.1.0",
+  "description": "Local-only opt-in plan and loop gates for explicit Mobius goals.",
+  "author": {
+    "name": "Mobius contributors",
+    "url": "https://github.com/boman-ngs"
+  },
+  "homepage": "https://github.com/boman-ngs/mobius#readme",
+  "repository": "https://github.com/boman-ngs/mobius",
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "loop-engineering",
+    "verification",
+    "acceptance-gate"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Mobius",
+    "shortDescription": "Plan it, loop it, accept only by recorded review.",
+    "longDescription": "Mobius is a local-only, opt-in project-private state machine for explicitly targeted goals. Users create a locked contract with mobius-plan, then mobius-loop drives the full plan through stage gates and recorded reviews until a terminal result or real stop condition.",
+    "developerName": "Mobius",
+    "category": "Productivity",
+    "capabilities": [
+      "Write",
+      "Review"
+    ],
+    "websiteURL": "https://github.com/boman-ngs/mobius",
+    "defaultPrompt": [
+      "Create and lock a Mobius goal contract.",
+      "Run a locked Mobius goal through the full loop."
+    ],
+    "brandColor": "#0F766E"
+  },
+  "mcpServers": "./.mcp.json"
+}
