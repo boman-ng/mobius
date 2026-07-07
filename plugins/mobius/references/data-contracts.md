@@ -53,6 +53,8 @@ Loop commands that can drive execution also return `mobius.loop`:
   "agent_must_stop": false,
   "next_required_action": "repair_stage",
   "next_command": "loop-start-stage --plan-item-id P2",
+  "next_argv": ["loop-start-stage", "--session-id", "s", "--goal-slug", "2026-07-01-example", "--plan-item-id", "P2"],
+  "next_actions": [{"type": "cli", "name": "start_stage", "argv": ["loop-start-stage", "--session-id", "s", "--goal-slug", "2026-07-01-example", "--plan-item-id", "P2"]}],
   "next_plan_item_id": "P2",
   "packet_id": "packet_delta_003",
   "review_mode": "delta_review",
@@ -76,6 +78,13 @@ ledger and evidence-reference index; it is not a copied contract payload or evid
 Reviewers start from the indexed ledgers and evidence refs, then use available non-mutating tools
 to inspect the necessary local facts. Each packet is one-shot input, and a `packet_id` may appear in
 `cv.csv` at most once.
+
+`loop.next_argv` is the machine-usable CLI argv for the next single command when the action can be
+expressed as one CLI command. `loop.next_actions` is the structured multi-step recipe for actions
+that need templates or host interaction, including evidence recording and MobiusCV review. Review
+recipes include the explicit host lifecycle: read packet, build subagent prompt, spawn/wait for the
+stateless host reviewer, record the review, then close the reviewer after success, failure, timeout,
+blocked result, or persistence error.
 
 ## Skill/MCP/CLI/Hook Responsibility Boundary
 
@@ -185,13 +194,29 @@ There are no separate decision, risk, gate, recovery, or proof-obligation mirror
 `pass` by itself. `supports_json` references acceptance ids. `artifact_json` stores structured
 proof metadata:
 
-- `command_result` and `test_result` store command metadata such as command name and exit code.
+- `command_result` and `test_result` store replay metadata such as command name, command string,
+  argv, project-root-relative cwd, exit code, duration, output/log reference, and optional
+  `validity_scope`.
 - `file_ref` points to an existing project-root-relative file and stores full local sha256.
 - `change_set_scope` describes paths, allowed change classes, forbidden paths, and required
   coverage flags: `tracked`, `staged`, `untracked`, and `intent_to_add`.
 - `human_assertion` records explicit human assertion text and is not structured proof by itself.
 
+When an acceptance `evidence_required_json` item declares `validity_scope`, matching evidence must
+declare the same value in `artifact_json`. Allowed scopes are `stage`, `final`, and `historical`;
+they distinguish proofs created during one stage from final release checks or historical context.
+Unscoped requirements remain compatible with older evidence rows.
+
 Packets only transmit compact refs with short hash tails; full hashes remain local.
+`evidence-add` accepts repeatable `--supports` values or `--supports-json` as either one JSON
+string or a JSON array of strings. Storage remains normalized as `supports_json`. Invalid
+`supports-json`, directory `file_ref` artifacts, and malformed `change_set_scope.coverage` return
+shape-specific errors before writing evidence.
+
+`explain --session-id ... --goal-slug ...` returns a derived diagnostic summary for one goal:
+terminal verdict, loop gate, pending reason, `next_argv`, `next_actions`, outstanding packet,
+review-attempt state, last CV summary, and unverified acceptance ids. It derives from canonical
+ledgers and is not a separate source of truth.
 
 `packets.csv` stores frozen packet index state:
 
@@ -222,6 +247,9 @@ output, copied diffs, or copied file contents.
 when `continue` reports `record_delta_review`, `record_exit_review`, or `retry_review`. It returns
 the packet envelope and validation metadata, not the CSV packet ledger row. If the packet already
 has a recorded review, callers create a fresh packet instead of reusing the old id.
+MobiusCV recorded review tools may receive this canonical `packet-read` result or a `packet_id`;
+they load the frozen packet from `packets.csv` before validation. Mutated packet envelopes still
+fail packet hash validation.
 
 `cv.csv` stores canonical recorded review rows:
 
@@ -231,21 +259,35 @@ schema,cv_id,goal_id,packet_id,review_mode,level,stateless,reviewers_json,compar
 
 It does not copy proof obligations; reviewers read indexed `plan.csv`, `acceptance.csv`,
 `evidence.csv`, and packet refs. A passing review row must include the canonical
-`input_refs.review_policy` used to derive its aggregate result. Raw reviewer output is kept in a
-local `raw_reviews/*.json` artifact when present; `cv.csv` stores only a root-relative `raw_ref` and
-short hash tail.
+`input_refs.review_policy` used to derive its aggregate result. Raw reviewer output is stripped from
+`reviewers_json`. Passing review rows store only `raw_hash_tail` by default; non-pass review rows
+keep full raw reviewer output in a local `raw_reviews/*.json` artifact and store only a
+root-relative `raw_ref` plus short hash tail in `cv.csv`. Set `MOBIUS_CV_RETAIN_PASS_RAW=1` only for
+explicit local audit/debug runs that need full raw output for passing reviews.
+`cv.csv` stores only valid reviewer judgments. Reviewer infrastructure failures such as missing
+CLI, authentication failure, timeout, invalid output, or missing workspace are not CV rows and do
+not consume a packet id. Preflight failures can return before a review attempt starts; failures
+after reviewer execution starts are tracked in `review_attempts.csv`.
+
+Exit-review recording is preceded by a fail-closed reviewer workspace preflight. When Kimi is a
+required reviewer, the preflight verifies Kimi availability, prompt-mode support, goal ledger
+visibility, and project-root visibility for packet `file_ref` refs before a review attempt is
+started. Preflight failures return `ok=false` / `persisted=false` and leave `cv.csv` and
+`review_attempts.csv` untouched for that packet.
 
 `loop.csv` stores per-stage runtime state only.
 
-`review_attempts.csv` stores review attempt lifecycle visibility:
+`review_attempts.csv` stores review attempt lifecycle visibility and compact diagnostics:
 
 ```csv
-schema,attempt_id,packet_id,review_mode,status,started_at,finished_at,reviewer_summary_ref
+schema,attempt_id,packet_id,review_mode,status,started_at,finished_at,reviewer_summary_ref,failure_kind,retryable,diagnostic_ref,retry_count
 ```
 
 Allowed statuses are `started`, `recorded`, `interrupted`, and `failed`. A `started` row without
-`finished_at` is treated by `ledger-audit` as an interrupted/open attempt and produces a retry
-action for the outstanding review packet.
+`finished_at` is treated by `ledger-audit` as an interrupted/open attempt. Retryable `failed` and
+`interrupted` attempts produce a `retry_review` action for the same outstanding packet while
+`packet_has_recorded_review` remains false. Non-retryable `failed` attempts stop at
+`fix_reviewer_infra` with the compact diagnostic fields visible through `explain`.
 
 `verdict.csv` is derived by Mobius:
 
@@ -291,9 +333,13 @@ unknown|pass|blocked -> superseded
 Only recorded delta review may write loop `passed`. Repairable delta review output keeps the stage
 `running`; blocked or budget-exhausted stages become loop `blocked`. A recorded exit review `fail`
 with checked active acceptance ids routes the earliest affected stage back to `running` for repair.
-Only recorded exit review may write acceptance `pass` or terminal `blocked` and compute the final
-verdict. Exit review `unknown`, degraded output, or unchecked required ids creates a fresh review
-packet instead of being treated as missing evidence.
+Recorded exit review may write acceptance `pass`; it writes terminal `blocked` only for
+`terminal_blocked` findings. Repairable exit blockers such as stale `file_ref` hashes, final
+command/test evidence that predates current source changes, stale packet refs, missing final
+evidence, or generated Python artifacts keep the goal active and route to `refresh_final_evidence`
+or fresh exit packet creation. Findings prefixed with `contract_change_required:` route to
+contract repair without terminal blocked. Exit review `unknown`, degraded output, or unchecked
+required ids creates a fresh review packet instead of being treated as missing evidence.
 
 ## Validation
 

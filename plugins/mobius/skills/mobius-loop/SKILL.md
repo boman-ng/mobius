@@ -34,6 +34,10 @@ never advance loop state, run reviewers, or accept a goal.
 2. Read status, audit the ledger, and ask for the next required action:
 
 ```bash
+python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> explain \
+  --session-id <codex-session-id> \
+  --goal-slug <yyyy-mm-dd-goal-slug>
+
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> loop-status \
   --session-id <codex-session-id> \
   --goal-slug <yyyy-mm-dd-goal-slug>
@@ -53,6 +57,8 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> con
      the user interrupts, or the goal reaches `accepted` or `blocked`.
    - Do not send a final answer just because a delta review passed. A delta pass means call
      `continue` again in the same turn.
+   - Prefer `loop.next_argv` and `loop.next_actions` over reconstructing commands from prose.
+     `next_command` remains a human-readable compatibility hint.
 4. When `loop.next_required_action=start_next_stage`, start exactly that stage and read the
    returned `stage_contract` JSON:
 
@@ -78,6 +84,9 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> evi
   --supports <A1> \
   --artifact-json '{"type":"command_result","name":"<command name>","command":"<command>","exit_code":0}'
 ```
+
+Use repeatable `--supports <A1>` or `--supports-json '"A1"'` / `--supports-json '["A1"]'`;
+Mobius stores normalized `supports_json` in the ledger.
 
 Use `--artifact <path>` only with `--type file_ref`. Use `change_set_scope` evidence for absence
 and scope claims:
@@ -118,6 +127,9 @@ rerun, create a new packet from the current Mobius ledgers. Do not reuse a previ
    - `mobius_cv_record_delta_review` to persist the stage review. Delta review defaults to
      `delta_light` with the host subagent only; use level 2 or `input_refs.review_policy` named
      `delta_kimi` when the stage needs the external Kimi reviewer.
+   - Close the completed host subagent after the review is recorded or after a record/persistence
+     failure is visible. The normal lifecycle is spawn, wait, record, then close; timeouts,
+     blocked reviews, and persistence errors still require close.
 
 9. After any recorded review result with `ok=true` and `persisted=true`, immediately call
    `continue` and execute the returned loop action. A repairable delta failure is normal loop
@@ -126,8 +138,10 @@ rerun, create a new packet from the current Mobius ledgers. Do not reuse a previ
    permission between stages or repair attempts unless the user explicitly requested one-stage mode
    or the loop reports `agent_must_stop=true`.
 10. When `continue` reports `create_exit_packet`, create an `exit_review` packet and call
-   `mobius_cv_record_exit_review`. If the exit review records a repairable fail, immediately call
-   `continue`; the loop will route the earliest affected stage back through normal repair work.
+   `mobius_cv_record_exit_review`. Exit packet creation and record preflight may return
+   `refresh_final_evidence` before Kimi runs when final file refs, command evidence, packet refs,
+   or generated Python artifacts are stale. Refresh evidence through `evidence-add`, then create a
+   new exit packet; never mutate or reuse the stale packet.
 11. When `continue` reports `record_exit_review` or exit-review `retry_review`, retrieve the
    outstanding packet through `packet-read`, then call `mobius_cv_record_exit_review` with that
    packet:
@@ -140,9 +154,13 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> pac
   --packet-id <packet_exit_001>
 ```
 
-12. Completion is allowed only when the recorded exit result returns `gate=accepted`.
-13. When a goal is `accepted` or `blocked`, stop the loop for that goal. Start a new
-    goal for later changes unless an explicit reopen design exists.
+12. If an exit review records repairable feedback, immediately call `continue`. Repairable exit
+    `fail` routes the affected stage back through normal repair work. Repairable exit `blocked`
+    routes to `refresh_final_evidence`, `record_missing_evidence`, `run_missing_command_evidence`,
+    or `create_new_packet` without making the goal terminal.
+13. Completion is allowed only when the recorded exit result returns `gate=accepted`.
+14. Stop only when the goal is `accepted`, the loop reports a true terminal `blocked`, or
+    `loop.agent_must_stop=true`.
 
 ## Rules
 
@@ -166,6 +184,8 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> pac
 - Do not pass prior review chat as scope for a new exit review.
 - Do not reuse a packet or `packet_id` for a second recorded review.
 - Do not create packets, record reviews, add evidence, or start stages after a terminal verdict.
+- Treat `refresh_final_evidence` as normal loop work: record current final evidence and create a
+  new exit packet from the current ledger.
 - Treat `ok=false`, `persisted=false`, terminal verdicts, explicit loop stops, and unavailable
   reviewer/tool classes as stops. Treat missing evidence and concrete reviewer revisions as loop
   work unless the loop reports a stop.
