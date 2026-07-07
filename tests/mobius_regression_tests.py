@@ -184,7 +184,14 @@ def stage_contract_args(
                 "entry": ["contract locked"],
                 "exit": ["test evidence command exits 0"],
                 "verifiers": ["command_result", "mobiuscv_delta"],
-                "review_focus": ["proof obligations"],
+                "review_focus": [
+                    {
+                        "question": "Does the evidence satisfy the proof obligation?",
+                        "blind_spot": "command result exists but does not cover the changed behavior",
+                        "counterevidence": "the command exits nonzero or omits the changed boundary",
+                        "expected_signal": "command_result exit_code 0 covers the boundary",
+                    }
+                ],
             }
         ),
         "--recovery-json",
@@ -200,7 +207,7 @@ def stage_contract_args(
             {
                 "retry_limit": 2,
                 "max_stage_attempts": 3,
-                "stop_condition": "recorded review blocks or passes",
+                "stop_condition": "loop reports accepted, terminal blocked, agent_must_stop, unavailable required reviewer/tool, or explicit user interruption",
             }
         ),
         "--acceptance-json",
@@ -212,7 +219,14 @@ def stage_contract_args(
                     "observable_outcome": "evidence.csv contains command_result proof row with exit code 0",
                     "evidence_required": [{"type": "command_result", "name": "test evidence", "exit_code": 0}],
                     "verifier": [{"type": "command_result", "name": "test evidence"}, {"type": "mobiuscv_delta"}],
-                    "review_focus": ["evidence_required_json is satisfied"],
+                    "review_focus": [
+                        {
+                            "question": "What would falsify this command proof?",
+                            "blind_spot": "process evidence without behavioral coverage",
+                            "counterevidence": "missing or nonzero command_result",
+                            "expected_signal": "evidence_required_json is satisfied",
+                        }
+                    ],
                     "required": True,
                 }
             ]

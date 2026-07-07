@@ -21,6 +21,8 @@ targeted Mobius goal.
 - MobiusCV has no runtime dependency on the separate CrossReview skill.
 - Terminal goals with `accepted` or `blocked` verdicts cannot receive new recorded
   reviews.
+- Reviewer cognition checks are expressed through the existing prompt and result fields. MobiusCV
+  does not add separate blind-spot, confidence, control-loop, or cognition result fields.
 
 ## Skill/MCP/CLI/Hook Responsibility Boundary
 
@@ -52,6 +54,17 @@ Recorded reviewer output is verification input for the CLI loop. Concrete revisi
 evidence, stale packets, and reviewer failures are returned as loop actions for the agent to repair
 or rerun. MobiusCV records valid reviewer judgments through the CLI persistence API; it does not
 mutate `loop.csv` directly and it does not decide final acceptance.
+
+Reviewers must audit more than the existence of a packet row. They check assumptions, known
+unknowns, blind spots, counterevidence, sensor quality, Goodhart or proxy risk, variety coverage,
+contract drift, staleness, and pruning concerns against the locked contract and objective evidence.
+Findings from these checks return as ordinary `blocking_findings`, `required_revisions`,
+unchecked ids, unknown verdicts, or blocked verdicts. They do not create new result fields or a
+parallel reviewer schema.
+
+Pruning findings are blocking when the implementation preserves obsolete examples, compatibility
+aliases, fallback parsers, glue branches, or history-preserving code without a locked contract
+naming the real external user, data, or API contract that requires them.
 
 Only completed reviewer outputs are valid CV judgments. Reviewer infrastructure failures such as
 missing CLI, auth failure, timeout, invalid output, or unavailable workspace are not `cv.csv` rows.
