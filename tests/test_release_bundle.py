@@ -97,7 +97,7 @@ def test_plugin_manifest_marketplace_mcp_and_hooks_shape() -> None:
 
     manifest = read_json(PLUGIN_ROOT / ".codex-plugin/plugin.json")
     assert manifest.get("name") == "mobius"
-    assert manifest.get("version") == "0.2.0"
+    assert manifest.get("version") == "0.3.0"
     assert manifest.get("license") == "Apache-2.0"
     assert manifest.get("skills") == "./skills/"
     assert manifest.get("mcpServers") == "./.mcp.json"
