@@ -17,8 +17,10 @@ skill content, marketplace metadata, or runtime policy after installation.
 - Hook launcher and hook definitions: `plugins/mobius/scripts/mobius_hook_launcher.sh` and
   `plugins/mobius/hooks/hooks.json`.
 - Durable plugin references: `plugins/mobius/references/`.
-- Release gate: `scripts/verify.sh`.
+- Test configuration: `pyproject.toml` and `requirements-dev.txt`.
 - Regression tests: `tests/mobius_regression_tests.py`.
+- Release bundle tests: `tests/test_release_bundle.py`.
+- CI release gate: `.github/workflows/ci.yml`.
 - Release docs and repository-level files: `README.md`, `docs/`, `CHANGELOG.md`,
   `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE`, `.github/`, and `.gitignore`.
 
@@ -69,17 +71,21 @@ documentation in the same change when the public contract changes.
 - Keep generated runtime files out of the plugin source tree. Use temporary directories or
   `PLUGIN_DATA` for launcher checks.
 
+## Commit Rules
+
+- Use Conventional Commits; each commit must be atomic and contain no more than four distinct changes.
+
 ## Verification Matrix
 
 | Change type | Required checks |
 |---|---|
-| Manifest, marketplace, hooks, MCP config, skills, scripts, or release docs | `bash scripts/verify.sh` |
-| Python script change | `bash scripts/verify.sh` |
-| Plugin manifest shape only | `bash scripts/verify.sh` |
-| Documentation only | Review rendered Markdown when tables, links, or command blocks change; run `bash scripts/verify.sh` when release commands, paths, or repository coordinates change |
+| Manifest, marketplace, hooks, MCP config, skills, scripts, or release docs | `PYTHONDONTWRITEBYTECODE=1 python -m pytest`; `PYTHONPYCACHEPREFIX="$(mktemp -d)" python -m py_compile plugins/mobius/scripts/mobius.py plugins/mobius/scripts/mobius_cv_mcp.py tests/mobius_regression_tests.py tests/test_release_bundle.py`; `PYTHONDONTWRITEBYTECODE=1 python plugins/mobius/scripts/mobius.py --project-root "$PWD" hook-health`; `git diff --check` |
+| Python script change | `PYTHONDONTWRITEBYTECODE=1 python -m pytest`; `PYTHONPYCACHEPREFIX="$(mktemp -d)" python -m py_compile plugins/mobius/scripts/mobius.py plugins/mobius/scripts/mobius_cv_mcp.py tests/mobius_regression_tests.py tests/test_release_bundle.py` |
+| Plugin manifest shape only | `PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_release_bundle.py` |
+| Documentation only | Review rendered Markdown when tables, links, or command blocks change; run `PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_release_bundle.py` when release commands, paths, or repository coordinates change |
 
-Use the narrowest meaningful check first, but run the full plugin verify script before treating a
-release-facing change as complete.
+Use the narrowest meaningful check first, but run the full pytest suite plus syntax, hook-health,
+and Git hygiene checks before treating a release-facing change as complete.
 
 ## Review Before Finishing
 

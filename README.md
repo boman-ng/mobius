@@ -103,11 +103,13 @@ hash metadata by default; non-pass rows retain local `raw_reviews/*.json` artifa
 From a checkout:
 
 ```bash
-bash scripts/verify.sh
+python -m pip install -r requirements-dev.txt
+PYTHONDONTWRITEBYTECODE=1 python -m pytest
 ```
 
-The verification script checks Python syntax, regression tests, plugin manifest shape, MCP launcher
-self-check, hook health, marketplace metadata, and ignored local Mobius state.
+The pytest suite checks regression behavior, plugin manifest shape, MCP launcher self-check,
+marketplace metadata, generated runtime artifacts, release-source hygiene, and ignored local Mobius
+state. CI also runs Python syntax, hook-health, and Git hygiene checks directly.
 
 ## Troubleshooting
 
