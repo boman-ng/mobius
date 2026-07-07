@@ -1,6 +1,6 @@
 {
   "name": "mobius",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-only opt-in plan and loop gates for explicit Mobius goals.",
   "author": {
     "name": "Mobius contributors",

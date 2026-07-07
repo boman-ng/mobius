@@ -29,7 +29,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import mobius
 
 
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 RESULT_SCHEMA = "mobius.cv_result"
 REVIEWER_SCHEMA = "mobius.cv_reviewer_result"
 VALID_REVIEW_MODES = {"delta_review", "exit_review"}
@@ -184,7 +184,7 @@ def classify_kimi_failure(stdout: str = "", stderr: str = "", status: str = "com
         return "auth_unavailable", False
     if status in {"first_event_timeout", "activity_idle_timeout", "hard_timeout"}:
         return status, True
-    if status in {"missing_cli", "no_prompt_mode", "startup_health_degraded"}:
+    if status in {"missing_cli", "no_prompt_mode", "startup_health_degraded", "workspace_unavailable"}:
         return status, False
     if status == "invalid_output":
         return status, True
@@ -196,6 +196,7 @@ def classify_kimi_failure(stdout: str = "", stderr: str = "", status: str = "com
 def run_kimi_review_command(
     args: list[str],
     *,
+    cwd: str | None = None,
     first_event_timeout_seconds: int = KIMI_FIRST_EVENT_TIMEOUT_SECONDS,
     activity_idle_timeout_seconds: int = KIMI_ACTIVITY_IDLE_TIMEOUT_SECONDS,
     hard_timeout_seconds: int = KIMI_HARD_TIMEOUT_SECONDS,
@@ -206,68 +207,72 @@ def run_kimi_review_command(
     pgid: int | None = None
     process: subprocess.Popen[str] | None = None
     timed_status: str | None = None
+    temp_cwd: tempfile.TemporaryDirectory[str] | None = None
     try:
-        with tempfile.TemporaryDirectory(prefix="mobius-cv-kimi-cwd-") as cwd:
-            process = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=cwd,
-                env=kimi_child_env(),
-                start_new_session=True,
-                bufsize=1,
-            )
-            pgid = os.getpgid(process.pid)
-            selector = selectors.DefaultSelector()
-            if process.stdout is not None:
-                selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-            if process.stderr is not None:
-                selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-            first_event_seen = False
-            last_event = start
+        run_cwd = cwd
+        if run_cwd is None:
+            temp_cwd = tempfile.TemporaryDirectory(prefix="mobius-cv-kimi-cwd-")
+            run_cwd = temp_cwd.name
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=run_cwd,
+            env=kimi_child_env(),
+            start_new_session=True,
+            bufsize=1,
+        )
+        pgid = os.getpgid(process.pid)
+        selector = selectors.DefaultSelector()
+        if process.stdout is not None:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        if process.stderr is not None:
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        first_event_seen = False
+        last_event = start
 
-            while True:
-                now = time.monotonic()
-                if process.poll() is not None:
-                    break
-                if now - start >= hard_timeout_seconds:
-                    timed_status = "hard_timeout"
-                    break
-                if not first_event_seen and now - start >= first_event_timeout_seconds:
-                    timed_status = "first_event_timeout"
-                    break
-                if first_event_seen and now - last_event >= activity_idle_timeout_seconds:
-                    timed_status = "activity_idle_timeout"
-                    break
+        while True:
+            now = time.monotonic()
+            if process.poll() is not None:
+                break
+            if now - start >= hard_timeout_seconds:
+                timed_status = "hard_timeout"
+                break
+            if not first_event_seen and now - start >= first_event_timeout_seconds:
+                timed_status = "first_event_timeout"
+                break
+            if first_event_seen and now - last_event >= activity_idle_timeout_seconds:
+                timed_status = "activity_idle_timeout"
+                break
 
-                events = selector.select(timeout=0.25)
-                for key, _mask in events:
-                    stream = key.fileobj
-                    line = stream.readline()
-                    if line == "":
-                        try:
-                            selector.unregister(stream)
-                        except Exception:
-                            pass
-                        continue
-                    if key.data == "stdout":
-                        stdout_parts.append(line)
-                    else:
-                        stderr_parts.append(line)
-                    first_event_seen = True
-                    last_event = time.monotonic()
+            events = selector.select(timeout=0.25)
+            for key, _mask in events:
+                stream = key.fileobj
+                line = stream.readline()
+                if line == "":
+                    try:
+                        selector.unregister(stream)
+                    except Exception:
+                        pass
+                    continue
+                if key.data == "stdout":
+                    stdout_parts.append(line)
+                else:
+                    stderr_parts.append(line)
+                first_event_seen = True
+                last_event = time.monotonic()
 
-            if timed_status:
-                terminate_process_group(pgid)
+        if timed_status:
+            terminate_process_group(pgid)
 
-            try:
-                more_stdout, more_stderr = process.communicate(timeout=2)
-            except subprocess.TimeoutExpired:
-                terminate_process_group(pgid, grace_seconds=0.1)
-                more_stdout, more_stderr = "", ""
-            stdout_parts.append(more_stdout or "")
-            stderr_parts.append(more_stderr or "")
+        try:
+            more_stdout, more_stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            terminate_process_group(pgid, grace_seconds=0.1)
+            more_stdout, more_stderr = "", ""
+        stdout_parts.append(more_stdout or "")
+        stderr_parts.append(more_stderr or "")
     except FileNotFoundError:
         return {
             "status": "missing_cli",
@@ -279,6 +284,8 @@ def run_kimi_review_command(
         }
     finally:
         terminate_process_group(pgid)
+        if temp_cwd is not None:
+            temp_cwd.cleanup()
 
     stdout = "".join(stdout_parts)
     stderr = "".join(stderr_parts)
@@ -364,10 +371,19 @@ def discover_kimi(deep: bool = False) -> dict[str, Any]:
     return result
 
 
+def packet_envelope_json(packet: dict[str, Any]) -> str:
+    return json.dumps(packet, ensure_ascii=False, sort_keys=True, indent=2)
+
+
 def load_packet(packet: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str, list[str]]:
-    if isinstance(packet, dict):
-        return packet, json.dumps(packet, ensure_ascii=False, sort_keys=True, indent=2), []
-    return None, "", ["packet JSON object is required"]
+    if packet is None:
+        return None, "", []
+    if not isinstance(packet, dict):
+        return None, "", ["packet JSON object is required"]
+    if packet.get("schema") == "mobius.command_result" and isinstance(packet.get("packet"), dict):
+        loaded = packet["packet"]
+        return loaded, packet_envelope_json(loaded), []
+    return packet, packet_envelope_json(packet), []
 
 
 def extract_required_acceptance_ids(packet: dict[str, Any] | None, explicit: list[str] | None) -> list[str]:
@@ -379,6 +395,95 @@ def extract_required_acceptance_ids(packet: dict[str, Any] | None, explicit: lis
     if isinstance(coverage, dict):
         return [str(item) for item in coverage]
     return []
+
+
+def path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def reviewer_workspace_path(context: dict[str, Any] | None) -> tuple[Path | None, list[str]]:
+    if not isinstance(context, dict) or not context.get("project_root"):
+        return None, ["project_root is required for Kimi reviewer workspace"]
+    root = Path(str(context["project_root"])).expanduser().resolve()
+    if not root.exists():
+        return None, [f"Kimi reviewer workspace is missing: {root}"]
+    if not root.is_dir():
+        return None, [f"Kimi reviewer workspace is not a directory: {root}"]
+    return root, []
+
+
+def reviewer_workspace_context(root: Path, goal_dir: Path, packet: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "type": "project_root",
+        "cwd": str(root),
+        "ledger_abs_root": str(goal_dir),
+        "ledger_root": str((packet or {}).get("ledger", {}).get("root", "")),
+        "visibility": "project_root_relative",
+    }
+
+
+def representative_file_ref_errors(root: Path, packet: dict[str, Any] | None) -> list[str]:
+    refs = (packet or {}).get("refs")
+    if not isinstance(refs, dict):
+        return ["packet refs are required for reviewer workspace preflight"]
+    errors: list[str] = []
+    for evidence_id, ref in sorted(refs.items()):
+        if not isinstance(ref, list) or len(ref) < 2 or str(ref[0]) != "file_ref":
+            continue
+        label = str(ref[1])
+        if Path(label).is_absolute():
+            errors.append(f"file_ref {evidence_id} must be project-root-relative: {label}")
+            continue
+        candidate = (root / label).resolve()
+        if not path_is_within(candidate, root):
+            errors.append(f"file_ref {evidence_id} escapes project root: {label}")
+            continue
+        if not candidate.is_file():
+            errors.append(f"file_ref {evidence_id} is not visible from reviewer workspace: {label}")
+    return errors
+
+
+def preflight_exit_review_workspace(
+    root: Path,
+    goal_dir: Path,
+    packet: dict[str, Any] | None,
+    policy: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    if "kimi-code" in policy.get("required_reviewers", []):
+        binary = shutil.which("kimi")
+        if not binary:
+            errors.append("Kimi reviewer preflight failed: kimi CLI is not installed or not on PATH")
+        capability = discover_kimi(deep=False) if binary else {"status": "missing_cli", "supports": {}}
+        supports = capability.get("supports") if isinstance(capability.get("supports"), dict) else {}
+        if capability.get("status") == "no_prompt_mode" or not supports.get("prompt"):
+            errors.append("Kimi reviewer preflight failed: kimi CLI does not expose prompt mode")
+        elif capability.get("status") not in {"ready", "startup_health_degraded"}:
+            errors.append(f"Kimi reviewer preflight failed: capability status {capability.get('status')}")
+
+    ledger_root = str((packet or {}).get("ledger", {}).get("root", ""))
+    if not ledger_root:
+        errors.append("exit reviewer preflight failed: packet ledger.root is missing")
+    elif Path(ledger_root).is_absolute():
+        errors.append("exit reviewer preflight failed: packet ledger.root must be project-root-relative")
+    else:
+        ledger_abs = (root / ledger_root).resolve()
+        if not path_is_within(ledger_abs, root):
+            errors.append("exit reviewer preflight failed: packet ledger.root escapes project root")
+        elif ledger_abs != goal_dir.resolve():
+            errors.append("exit reviewer preflight failed: packet ledger.root does not match goal directory")
+        elif not ledger_abs.is_dir():
+            errors.append("exit reviewer preflight failed: packet ledger.root is not visible from reviewer workspace")
+
+    for name in ("goal.md", "goal.csv", "plan.csv", "acceptance.csv", "evidence.csv", "packets.csv"):
+        if not (goal_dir / name).is_file():
+            errors.append(f"exit reviewer preflight failed: ledger file is not visible: {name}")
+    errors.extend(representative_file_ref_errors(root, packet))
+    return errors
 
 
 def missing_ids(required_ids: list[str], checked_ids: Any) -> list[str]:
@@ -820,12 +925,22 @@ def run_kimi_review(
         )
     startup_kimi = STARTUP_HEALTH if isinstance(STARTUP_HEALTH, dict) else {}
     startup_connectivity = startup_kimi.get("startup_connectivity") if isinstance(startup_kimi.get("startup_connectivity"), dict) else {}
+    workspace, workspace_errors = reviewer_workspace_path(context)
+    if workspace_errors:
+        return degraded_kimi_result(
+            "workspace_unavailable",
+            review_mode,
+            required_ids,
+            "; ".join(workspace_errors),
+            retryable=False,
+        )
     prompt = review_prompt(packet_json, review_mode, required_ids, "kimi-code", context)
     hard_timeout = int(timeout_seconds or KIMI_HARD_TIMEOUT_SECONDS)
     first_event_timeout = min(KIMI_FIRST_EVENT_TIMEOUT_SECONDS, hard_timeout)
     activity_idle_timeout = min(KIMI_ACTIVITY_IDLE_TIMEOUT_SECONDS, hard_timeout)
     raw = run_kimi_review_command(
         [binary, "-p", prompt, "--output-format", "stream-json"],
+        cwd=str(workspace),
         first_event_timeout_seconds=first_event_timeout,
         activity_idle_timeout_seconds=activity_idle_timeout,
         hard_timeout_seconds=hard_timeout,
@@ -849,7 +964,7 @@ def run_kimi_review(
         return result
     parsed = normalize_reviewer_result(assistant_text_from_stream_json(str(raw.get("stdout", ""))), "kimi-code", review_mode, required_ids)
     parsed["reviewer_id"] = "kimi-code"
-    parsed["cli"] = {"command": "kimi", "output_format": "stream-json"}
+    parsed["cli"] = {"command": "kimi", "output_format": "stream-json", "cwd": str(workspace)}
     parsed["startup_connectivity"] = startup_connectivity
     parsed["raw_ref"] = ""
     raw_material = str(raw.get("stdout", "")) + "\n" + str(raw.get("stderr", ""))
@@ -908,7 +1023,13 @@ def build_cv_result(
     }
 
 
-def recorded_error(review_mode: str, error: str, cv_result: dict[str, Any] | None = None) -> dict[str, Any]:
+def recorded_error(
+    review_mode: str,
+    error: str,
+    cv_result: dict[str, Any] | None = None,
+    *,
+    next_required_action: str = "fix_review_or_persistence_error",
+) -> dict[str, Any]:
     return {
         "schema": "mobius.cv_recorded_result",
         "ok": False,
@@ -919,15 +1040,60 @@ def recorded_error(review_mode: str, error: str, cv_result: dict[str, Any] | Non
         "review_mode": review_mode,
         "gate": "error",
         "updated_files": [],
-        "next_required_action": "fix_review_or_persistence_error",
+        "next_required_action": next_required_action,
         "blocking_findings": [error],
         "errors": [error],
         "error": error,
     }
 
 
+def recorded_infra_failure(
+    review_mode: str,
+    goal_id: str,
+    packet_id: str,
+    cv_id: str,
+    findings: list[str],
+    loop: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "mobius.cv_recorded_result",
+        "ok": True,
+        "persisted": True,
+        "goal_id": goal_id,
+        "packet_id": packet_id,
+        "cv_id": cv_id,
+        "review_mode": review_mode,
+        "gate": str(loop.get("loop_gate", "running")),
+        "updated_files": ["review_attempts.csv"],
+        "next_required_action": str(loop.get("next_required_action", "retry_review")),
+        "blocking_findings": findings,
+        "errors": [],
+        "infra_failure": True,
+        "loop": loop,
+    }
+
+
 def missing_codex_subagent_result_error() -> str:
     return "codex_subagent_result is required; call mobius_cv_build_subagent_prompt, run the host Codex subagent, then pass its stateless result back"
+
+
+def reviewer_infra_failures(cv_result: dict[str, Any]) -> list[str]:
+    reviewers = cv_result.get("reviewers")
+    if not isinstance(reviewers, list):
+        return ["reviewers are unavailable"]
+    findings: list[str] = []
+    for reviewer in reviewers:
+        if not isinstance(reviewer, dict):
+            findings.append("reviewer result is not an object")
+            continue
+        status = str(reviewer.get("status", ""))
+        if status == "completed":
+            continue
+        reviewer_id = str(reviewer.get("reviewer_id", "unknown"))
+        blocking = reviewer.get("blocking_findings")
+        detail = "; ".join(str(item) for item in blocking) if isinstance(blocking, list) and blocking else status
+        findings.append(f"{reviewer_id} infrastructure failure: {detail}")
+    return findings
 
 
 def review_and_record(
@@ -936,6 +1102,7 @@ def review_and_record(
     session_id: str,
     goal_slug: str,
     packet: dict[str, Any] | None,
+    packet_id: str | None,
     level: int,
     codex_subagent_result: dict[str, Any] | str | None,
     required_acceptance_ids: list[str] | None,
@@ -950,13 +1117,20 @@ def review_and_record(
     loaded_packet, loaded_text, errors = load_packet(packet)
     if errors:
         return recorded_error(review_mode, "; ".join(errors))
-    ids = target_acceptance_ids or extract_required_acceptance_ids(loaded_packet, required_acceptance_ids)
-    if review_mode == "delta_review" and not target_plan_item_id:
-        return recorded_error(review_mode, "target_plan_item_id is required for delta_review")
-    if review_mode == "delta_review" and not ids:
-        return recorded_error(review_mode, "target_acceptance_ids or packet required_acceptance_ids are required for delta_review")
     root = Path(project_root).expanduser().resolve()
     goal_dir = mobius.load_goal_dir(root, session_id, goal_slug)
+    if loaded_packet is None and packet_id:
+        loaded_packet = mobius.packet_envelope_from_ledger(goal_dir, packet_id)
+        if loaded_packet is None:
+            return recorded_error(review_mode, f"packet_id is not recorded in packets.csv: {packet_id}")
+        loaded_text = packet_envelope_json(loaded_packet)
+    if loaded_packet is None:
+        return recorded_error(review_mode, "packet JSON object or packet_id is required")
+    ids = target_acceptance_ids or extract_required_acceptance_ids(loaded_packet, required_acceptance_ids)
+    if review_mode == "delta_review" and not target_plan_item_id:
+        return recorded_error(review_mode, "target_plan_item_id is required for delta_review", cv_result=loaded_packet)
+    if review_mode == "delta_review" and not ids:
+        return recorded_error(review_mode, "target_acceptance_ids or packet required_acceptance_ids are required for delta_review", cv_result=loaded_packet)
     terminal = mobius.terminal_verdict(goal_dir)
     if terminal:
         return recorded_error(review_mode, mobius.terminal_goal_error("record_cv_result", terminal), cv_result=loaded_packet)
@@ -973,14 +1147,12 @@ def review_and_record(
     expected_ids = [str(item) for item in ids] if review_mode == "delta_review" else None
     _normalized_packet, packet_errors = mobius.validate_packet_for_goal(goal_dir, loaded_packet or {}, review_mode, expected_ids)
     if packet_errors:
-        return recorded_error(review_mode, "; ".join(packet_errors))
+        action = "refresh_final_evidence" if review_mode == "exit_review" and any(
+            mobius.REPAIRABLE_EXIT_BLOCKER_PATTERN.search(error) for error in packet_errors
+        ) else "fix_review_or_persistence_error"
+        return recorded_error(review_mode, "; ".join(packet_errors), next_required_action=action)
     if codex_subagent_result is None:
         return recorded_error(review_mode, missing_codex_subagent_result_error(), cv_result=loaded_packet)
-    attempt_id = ""
-    try:
-        attempt_id = mobius.review_attempt_started(goal_dir, packet_id, review_mode)
-    except mobius.MobiusError:
-        attempt_id = ""
     goal_state = mobius.read_single_csv(goal_dir / "goal.csv") or {}
     refs = dict(input_refs or {})
     refs.setdefault("project_root", str(root))
@@ -988,6 +1160,18 @@ def review_and_record(
     refs.setdefault("ledger_root", str((loaded_packet or {}).get("ledger", {}).get("root", "")))
     refs.setdefault("goal_slug", goal_slug)
     refs.setdefault("session_id", session_id)
+    policy = mobius.review_gate_policy(review_mode, refs.get("review_policy") or {"level": level})
+    refs["review_policy"] = policy
+    refs.setdefault("review_workspace", reviewer_workspace_context(root, goal_dir, loaded_packet))
+    if review_mode == "exit_review":
+        preflight_errors = preflight_exit_review_workspace(root, goal_dir, loaded_packet, policy)
+        if preflight_errors:
+            return recorded_error(review_mode, "; ".join(preflight_errors), cv_result=loaded_packet)
+    attempt_id = ""
+    try:
+        attempt_id = mobius.review_attempt_started(goal_dir, packet_id, review_mode)
+    except mobius.MobiusError:
+        attempt_id = ""
     try:
         cv_result = build_cv_result(
             review_mode,
@@ -1002,13 +1186,39 @@ def review_and_record(
             str(goal_state.get("goal_id", "")),
             packet_id,
         )
+        infra_failures = reviewer_infra_failures(cv_result)
+        if infra_failures:
+            retryable = all(
+                bool(reviewer.get("retryable", True))
+                for reviewer in cv_result.get("reviewers", [])
+                if isinstance(reviewer, dict) and reviewer.get("status") != "completed"
+            )
+            if attempt_id:
+                mobius.review_attempt_finished(
+                    goal_dir,
+                    attempt_id,
+                    "failed",
+                    cv_id or str(cv_result.get("cv_id", "")),
+                    failure_kind="reviewer_infra_failure",
+                    retryable=retryable,
+                    diagnostic_ref=cv_id or str(cv_result.get("cv_id", "")),
+                )
+            audit = mobius.ledger_audit_data(root, session_id, goal_slug)
+            return recorded_infra_failure(
+                review_mode,
+                str(goal_state.get("goal_id", "")),
+                packet_id,
+                str(cv_result.get("cv_id", "")),
+                infra_failures,
+                audit["loop"],
+            )
     except KeyboardInterrupt:
         if attempt_id:
             mobius.review_attempt_finished(goal_dir, attempt_id, "interrupted")
         raise
     except mobius.MobiusError as exc:
         if attempt_id:
-            mobius.review_attempt_finished(goal_dir, attempt_id, "failed")
+            mobius.review_attempt_finished(goal_dir, attempt_id, "failed", failure_kind="mobius_error", retryable=False, diagnostic_ref=str(exc)[:160])
         return recorded_error(review_mode, str(exc), cv_result=loaded_packet)
     try:
         recorded = mobius.record_cv_result(
@@ -1029,11 +1239,11 @@ def review_and_record(
         raise
     except mobius.MobiusError as exc:
         if attempt_id:
-            mobius.review_attempt_finished(goal_dir, attempt_id, "failed")
+            mobius.review_attempt_finished(goal_dir, attempt_id, "failed", failure_kind="mobius_error", retryable=False, diagnostic_ref=str(exc)[:160])
         return recorded_error(review_mode, str(exc), cv_result=cv_result)
     except OSError as exc:
         if attempt_id:
-            mobius.review_attempt_finished(goal_dir, attempt_id, "failed")
+            mobius.review_attempt_finished(goal_dir, attempt_id, "failed", failure_kind="persistence_error", retryable=True, diagnostic_ref=str(exc)[:160])
         return recorded_error(review_mode, f"persistence error: {exc}", cv_result=cv_result)
 
 
@@ -1111,6 +1321,8 @@ def mobius_cv_build_subagent_prompt(
     loaded_packet, loaded_text, errors = load_packet(packet)
     if errors:
         return {"schema": "mobius.cv_error", "ok": False, "error": "; ".join(errors)}
+    if loaded_packet is None:
+        return {"schema": "mobius.cv_error", "ok": False, "error": "packet JSON object is required"}
     required_ids = extract_required_acceptance_ids(loaded_packet, required_acceptance_ids)
     return {
         "schema": "mobius.cv_subagent_prompt",
@@ -1128,6 +1340,7 @@ def mobius_cv_record_delta_review(
     target_plan_item_id: str,
     target_acceptance_ids: list[str] | None = None,
     packet: dict[str, Any] | None = None,
+    packet_id: str | None = None,
     level: int = 1,
     codex_subagent_result: dict[str, Any] | str | None = None,
     required_acceptance_ids: list[str] | None = None,
@@ -1142,6 +1355,7 @@ def mobius_cv_record_delta_review(
         session_id,
         goal_slug,
         packet,
+        packet_id,
         level,
         codex_subagent_result,
         required_acceptance_ids,
@@ -1159,6 +1373,7 @@ def mobius_cv_record_exit_review(
     session_id: str,
     goal_slug: str,
     packet: dict[str, Any] | None = None,
+    packet_id: str | None = None,
     level: int = 2,
     codex_subagent_result: dict[str, Any] | str | None = None,
     required_acceptance_ids: list[str] | None = None,
@@ -1173,6 +1388,7 @@ def mobius_cv_record_exit_review(
         session_id,
         goal_slug,
         packet,
+        packet_id,
         level,
         codex_subagent_result,
         required_acceptance_ids,
