@@ -7,6 +7,10 @@ recorded review, and final exit review before acceptance.
 Mobius is meant for work where "done" should be backed by a small local ledger instead of agent
 confidence. It does not send project state to a hosted Mobius service.
 
+For explicitly targeted goals, Mobius makes the plan, evidence, feedback, review, stop conditions,
+and blind-spot checks visible so completion depends on recorded gates rather than an agent's
+confidence narrative.
+
 ## What It Includes
 
 - `mobius-plan`: creates, validates, and locks an explicit goal contract.
