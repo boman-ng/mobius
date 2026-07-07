@@ -2,6 +2,16 @@
 
 All notable changes to Mobius are documented here.
 
+## 0.3.0 - 2026-07-07
+
+- Add agentic Mobius plan and loop guidance grounded in first-principles framing, stage control
+  checks, blind-spot inspection, disconfirmation, and pruning discipline.
+- Strengthen MobiusCV reviewer prompts around evidence quality, assumptions, counterevidence,
+  Goodhart risk, variety coverage, contract drift, and fail-closed completion.
+- Replace the legacy shell verification wrapper with pytest-based release-bundle tests and a direct
+  GitHub Actions CI workflow for syntax, pytest, hook-health, and Git hygiene checks.
+- Document pytest-first verification and Conventional Commit expectations for repository work.
+
 ## 0.2.0 - 2026-07-07
 
 - Harden MobiusCV review recording with reviewer workspace preflight, canonical packet loading,
