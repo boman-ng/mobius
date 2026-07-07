@@ -64,7 +64,9 @@ INSTRUCTIONS = (
     "Use MobiusCV only for an explicitly targeted Mobius goal. Pass a frozen JSON index packet "
     "with local file references every time. Do not pass prior review chat as scope. "
     "Delta reviews only check changed claims; exit reviews must check the full acceptance matrix. "
-    "Missing, unchecked, invalid, or degraded reviewer output is not a pass."
+    "Reviewers audit evidence quality, assumptions, blind spots, disconfirmation, Goodhart risk, "
+    "contract drift, staleness, and pruning concerns. Missing, unchecked, invalid, ambiguous, or "
+    "degraded reviewer output is not a pass."
 )
 
 mcp = FastMCP(name="mobius-cv", instructions=INSTRUCTIONS)
@@ -545,7 +547,12 @@ Review scope:
 - Inspect plan stage contract fields: scope_json, work_json, gate_json, recovery_json, budget_json, and acceptance_ids_json when needed.
 - Inspect linked acceptance fields: requirement, observable_outcome, evidence_required_json, verifier_json, and review_focus_json when needed.
 - Inspect evidence rows for the linked acceptance ids and verify they satisfy evidence_required_json.
+- Check assumptions, known unknowns, blind spots, counterevidence, and expected feedback signals when they appear in review_focus_json or contract fields.
+- For each checked required acceptance id, identify a plausible disconfirming observation that
+  would falsify the acceptance claim; if no such observation is considered, do not return pass.
+- Check contract drift: implementation and review claims must stay inside locked scope_json, work_json, gate_json, recovery_json, budget_json, and linked acceptance ids.
 - Treat missing evidence, unchecked acceptance rows, degraded tools, or ambiguity as unknown, not pass.
+- Treat Agent confidence, self-review, stage completion, or process completion as insufficient for pass.
 - Prefer concrete blockers over general advice.
 
 Frozen index and tool boundary:
@@ -554,8 +561,12 @@ Frozen index and tool boundary:
 - Start from packet.ledger, packet.coverage, and packet.refs.
 - The reviewer may inspect local context needed to validate a referenced claim, path, command, or absence claim.
 - Keep review activity read-only: do not modify files, write artifacts, install dependencies, start services, or run destructive commands.
+- Audit sensor quality: refs, file hashes when practical, command and test exit semantics, evidence freshness, coverage limits, and whether the evidence actually measures the user outcome.
+- Check Goodhart or proxy risk: a passing metric, command, or process must not replace the locked observable outcome.
+- Check variety coverage when required: happy path, boundary, negative, state, and absence-claim evidence should match the acceptance risk.
 - Before relying on an indexed file, compare its local hash when practical.
-- If an indexed file is missing, unreadable, or hash-mismatched, return VERDICT: unknown or VERDICT: blocked with a blocking finding.
+- If an indexed file is missing, unreadable, hash-mismatched, stale, or older than final source changes when final evidence is required, return VERDICT: unknown or VERDICT: blocked with a blocking finding.
+- Flag compatibility, fallback, alias, glue, or history-preserving code when no locked contract names a real external user, data, or API contract that requires it.
 
 Required acceptance ids:
 {compact_json(required_ids)}
@@ -566,6 +577,9 @@ Checklist claims:
 - C3: No degraded, missing, or ambiguous evidence is treated as pass.
 - C4: The review mode is {review_mode} and the reviewer id is {reviewer}.
 - C5: The review checked contract fields rather than relying on prose summaries.
+- C6: Assumptions, blind spots, counterevidence, and Goodhart or proxy risk were checked against objective evidence.
+- C7: Every checked required acceptance id was considered against a disconfirming observation that would falsify the claim.
+- C8: Contract drift, stale refs, unchecked ids, and pruning concerns are surfaced as normal blocking findings or required revisions.
 
 Frozen Mobius packet JSON:
 ```json
@@ -577,6 +591,7 @@ Self-check before returning:
 - CHECKED_ACCEPTANCE_IDS, UNCHECKED_ACCEPTANCE_IDS, BLOCKING_FINDINGS, REQUIRED_REVISIONS, and EVIDENCE_CHECKED must be JSON arrays.
 - Empty arrays must be [].
 - Missing evidence is unknown, not pass.
+- Stale evidence, unchecked ids, degraded reviewers, ambiguous evidence, or confidence-only completion is not pass.
 - For delta_review, do not issue final acceptance.
 - For exit_review, check the full active required plan DAG and acceptance matrix.
 
