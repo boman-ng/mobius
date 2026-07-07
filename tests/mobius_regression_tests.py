@@ -3538,20 +3538,30 @@ def test_public_docs_skills_and_verify_surface() -> None:
     assert "Run one explicit Mobius goal stage" not in loop_yaml
     assert "Run the next Mobius plan stage through review" not in loop_yaml
 
-    verify = (REPO_ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
-    assert re.search(r"/home/[A-Za-z0-9_.-]+", verify) is None
-    assert re.search(r"/Users/[A-Za-z0-9_.-]+", verify) is None
-    assert re.search(r"C:\\Users\\[A-Za-z0-9_.-]+", verify) is None
-    assert 'expected_owner = "boman-ng"' in verify
-    assert 'expected_slug = f"{expected_owner}/mobius"' in verify
-    assert "PYTHONPYCACHEPREFIX" in verify
-    assert "validate_bundle" in verify
-    assert ".agents/plugins/marketplace.json" in verify
-    assert "forbidden_plugin_source_paths" in verify
-    assert "release_text_paths" in verify
-    assert "mobius_cv_mcp_server.sh\" --self-check" in verify
-    assert "hook-health" in verify
-    assert "git -C \"$REPO_ROOT\" check-ignore -q .mobius/probe" in verify
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "blind-spot checks" in readme
+    assert "confidence narrative" in readme
+
+    agentic_surface = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [
+            *ROOT.glob("skills/*/SKILL.md"),
+            *ROOT.glob("skills/*/agents/openai.yaml"),
+            *ROOT.glob("references/*.md"),
+            REPO_ROOT / "README.md",
+        ]
+    )
+    stale_agentic_terms = [
+        "loop-next",
+        "advance_to_next_" + "plan_item",
+        "packet_path",
+        "packet_text",
+        "delta_" + "packet_id",
+        "exit_" + "packet_id",
+        "compatibility hint",
+    ]
+    for term in stale_agentic_terms:
+        assert term not in agentic_surface
 
 
 def test_mcp_launcher_self_check() -> None:
@@ -3577,86 +3587,3 @@ def test_mcp_launcher_self_check() -> None:
         )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("mobius-cv-launcher-ok")
-
-
-TESTS = [
-    test_plan_loop_packet_smoke_path,
-    test_contract_defaults_are_explicit_and_lockable,
-    test_contract_lock_rejects_zero_stage_goal,
-    test_contract_add_stage_rejects_required_stage_without_required_acceptance,
-    test_locked_goal_contract_is_frozen,
-    test_contract_validation_rejects_bad_acceptance_and_verifiers,
-    test_contract_add_stage_rejects_without_half_written_rows,
-    test_contract_lock_hash_covers_structural_fields,
-    test_contract_supersede_stage_is_transactional_and_explicit,
-    test_contract_supersede_stage_blocks_active_dependents,
-    test_continue_respects_dependencies,
-    test_packet_read_recovers_existing_packet_without_csv_transport,
-    test_mcp_record_review_accepts_packet_id_and_packet_read_result,
-    test_loop_lifecycle_commands_return_mirrored_loop_actions,
-    test_record_missing_evidence_loop_action_for_non_command_proof,
-    test_unlocked_contract_blocks_loop_packet_and_recorded_review,
-    test_evidence_requires_known_acceptance_and_structured_required_proof,
-    test_evidence_validity_scope_distinguishes_stage_final_and_historical,
-    test_packet_is_lightweight_index_and_hash_checked,
-    test_file_ref_and_change_set_scope_evidence_are_compact_refs,
-    test_evidence_path_boundaries_are_enforced,
-    test_csv_row_shaped_packet_is_not_transport,
-    test_recorded_delta_pass_updates_loop_and_records_policy,
-    test_ledger_audit_reports_missing_exit_cv,
-    test_exit_review_interruption_is_visible,
-    test_status_lists_active_goals_and_loop_next_is_not_public,
-    test_explain_summarizes_goal_loop_packet_cv_and_attempts,
-    test_nonretryable_review_attempt_stops_for_infra_repair,
-    test_delta_light_policy_and_mcp_default_skip_kimi,
-    test_raw_review_retention_compacts_pass_and_keeps_non_pass_artifacts,
-    test_pass_cv_requires_recorded_review_policy,
-    test_recorded_review_rejects_aggregate_mismatch_and_degraded_pass,
-    test_delta_pass_requires_satisfied_proof_obligations,
-    test_repairable_delta_fail_returns_repair_stage,
-    test_repair_budget_exhaustion_stops_loop,
-    test_delta_unknown_review_quality_routes_to_new_packet_before_budget_or_evidence,
-    test_blocked_delta_returns_blocked_loop,
-    test_public_loop_stop_reasons_are_closed_set,
-    test_recorded_exit_pass_updates_acceptance_verdict_and_run,
-    test_recorded_exit_failure_does_not_half_write_state,
-    test_recorded_exit_failure_repairs_earliest_stage_and_repairable_blocked_refreshes_evidence,
-    test_recorded_exit_terminal_blocked_remains_terminal,
-    test_recorded_exit_contract_change_required_routes_to_contract_action,
-    test_recorded_exit_unknown_creates_new_exit_packet_not_evidence_action,
-    test_recorded_exit_fail_with_degraded_or_unchecked_retries_exit_review,
-    test_recorded_exit_fail_budget_exhaustion_persists_blocked_loop,
-    test_packet_id_is_one_shot_for_delta_review,
-    test_terminal_goal_blocks_mutations_and_recorded_reviews,
-    test_mobius_cv_prompt_allows_autonomous_review_tools,
-    test_mobius_cv_parser_accepts_and_rejects_contract_blocks,
-    test_kimi_adapter_handles_auth_timeout_and_invalid_output,
-    test_kimi_review_uses_project_root_workspace,
-    test_kimi_stream_extractor_requires_assistant_role,
-    test_kimi_startup_health_is_lazy_by_default,
-    test_mcp_missing_subagent_fails_before_reviewers_and_packet_consumption,
-    test_mcp_reviewer_infra_failure_retries_same_packet_without_cv_row,
-    test_exit_review_preflight_blocks_invisible_file_ref_before_attempt,
-    test_exit_packet_create_blocks_stale_file_ref_before_review,
-    test_exit_packet_create_blocks_outdated_final_command_evidence,
-    test_exit_packet_create_blocks_missing_final_scoped_evidence,
-    test_generated_python_artifacts_are_cheap_exit_diagnostics,
-    test_mcp_registry_and_recorded_surface,
-    test_stop_hook_blocks_only_explicit_pending_goal,
-    test_pre_tool_hook_blocks_state_writes_and_allows_reads,
-    test_pre_tool_hook_does_not_scan_packet_create_commands,
-    test_hook_config_dispatches_current_events,
-    test_public_docs_skills_and_verify_surface,
-    test_mcp_launcher_self_check,
-]
-
-
-def main() -> int:
-    for test in TESTS:
-        test()
-        print(f"ok {test.__name__}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
