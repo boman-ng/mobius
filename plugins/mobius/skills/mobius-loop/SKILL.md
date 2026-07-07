@@ -58,7 +58,25 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> con
    - Do not send a final answer just because a delta review passed. A delta pass means call
      `continue` again in the same turn.
    - Prefer `loop.next_argv` and `loop.next_actions` over reconstructing commands from prose.
-     `next_command` remains a human-readable compatibility hint.
+     `next_command` is for human-readable display only.
+
+### Stage Control Check
+
+Use this check inside the existing full-plan loop. It is execution discipline, not a new user
+confirmation gate and not a second controller.
+
+- Observe: read `explain`, `loop-status`, `ledger-audit`, `continue`, and the returned
+  `stage_contract` JSON before acting.
+- Orient: restate the selected stage goal, constraints, invariants, non-goals, assumptions,
+  evidence obligations, and stop condition from the returned contract.
+- Act: implement only the selected stage scope and leave unrelated paths alone.
+- Evidence: record objective evidence that satisfies minimum evidence and disconfirmation
+  obligations; MobiusCV review is a verifier, not evidence.
+- Review: send a fresh one-shot packet to MobiusCV and treat review as external feedback, not
+  final truth.
+- Continue/Stop: branch only on loop JSON and recorded review fields, then continue the full plan
+  unless a Programic stop is returned.
+
 4. When `loop.next_required_action=start_next_stage`, start exactly that stage and read the
    returned `stage_contract` JSON:
 
@@ -137,6 +155,10 @@ rerun, create a new packet from the current Mobius ledgers. Do not reuse a previ
    `run_missing_command_evidence`, `create_new_packet`, or `retry_review`. Do not ask the user for
    permission between stages or repair attempts unless the user explicitly requested one-stage mode
    or the loop reports `agent_must_stop=true`.
+   Repair the cause, not the symptom: remove wrong-path edits, stale tests, obsolete docs, and
+   process-only proof that no longer supports the locked acceptance row. Do not layer fallback,
+   alias, or glue code unless the locked contract names a real external user, data, or API
+   contract that must be protected.
 10. When `continue` reports `create_exit_packet`, create an `exit_review` packet and call
    `mobius_cv_record_exit_review`. Exit packet creation and record preflight may return
    `refresh_final_evidence` before Kimi runs when final file refs, command evidence, packet refs,
@@ -171,6 +193,10 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> pac
   explicitly requested one-stage mode.
 - Implement exactly the returned stage scope, work, gate, recovery, budget, and acceptance proof
   obligations. Do not infer stage boundaries from prose.
+- Run the stage control check for each stage: observe, orient, act, evidence, review, then
+  continue or stop from loop JSON.
+- During repair, prune obsolete wrong-path artifacts instead of preserving historical examples,
+  compatibility aliases, broad fallbacks, or glue layers.
 - Pass the packet JSON object to MobiusCV. Do not pass CSV packet ledger rows.
 - Branch only on command/review fields: `loop.agent_must_continue`,
   `loop.agent_must_stop`, `ok`, `persisted`, `gate`, `next_required_action`,

@@ -1,7 +1,7 @@
 interface:
   display_name: "Mobius Loop"
-  short_description: "Run one explicit Mobius goal stage."
-  default_prompt: "Run the next Mobius plan stage through review."
+  short_description: "Run a locked Mobius goal through the full plan loop."
+  default_prompt: "Run the full locked Mobius plan loop until accepted, terminal blocked, or a real stop gate."
 
 dependencies:
   tools:
