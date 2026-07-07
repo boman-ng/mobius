@@ -13,10 +13,17 @@ Mobius changes should preserve the local-only, explicit-goal state model.
 Run the narrow checks for your change, and run the release gate before opening a release PR:
 
 ```bash
-python3 tests/mobius_regression_tests.py
-python3 -m py_compile plugins/mobius/scripts/mobius.py plugins/mobius/scripts/mobius_cv_mcp.py tests/mobius_regression_tests.py
+python -m pip install -r requirements-dev.txt
+PYTHONDONTWRITEBYTECODE=1 python -m pytest
+PYTHONPYCACHEPREFIX="$(mktemp -d)" python -m py_compile \
+  plugins/mobius/scripts/mobius.py \
+  plugins/mobius/scripts/mobius_cv_mcp.py \
+  tests/mobius_regression_tests.py \
+  tests/test_release_bundle.py
 PLUGIN_DATA="$(mktemp -d)" plugins/mobius/scripts/mobius_cv_mcp_server.sh --self-check
-bash scripts/verify.sh
+PYTHONDONTWRITEBYTECODE=1 python plugins/mobius/scripts/mobius.py --project-root "$PWD" hook-health
+git diff --check
+git check-ignore -q .mobius/probe
 ```
 
 ## Rules For Changes

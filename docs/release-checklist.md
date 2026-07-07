@@ -7,11 +7,18 @@ Use this checklist before tagging `v0.2.0`.
 Run the release gate from a clean checkout:
 
 ```bash
-bash scripts/verify.sh
+python -m pip install -r requirements-dev.txt
+PYTHONDONTWRITEBYTECODE=1 python -m pytest
+PYTHONPYCACHEPREFIX="$(mktemp -d)" python -m py_compile \
+  plugins/mobius/scripts/mobius.py \
+  plugins/mobius/scripts/mobius_cv_mcp.py \
+  tests/mobius_regression_tests.py \
+  tests/test_release_bundle.py
+python plugins/mobius/scripts/mobius.py --project-root "$PWD" hook-health
 git diff --check && git status --short --ignored=no
 ```
 
-The first command must pass. Inspect the second command output before tagging: no local Mobius
+All commands must pass. Inspect the final status output before tagging: no local Mobius
 ledger state should appear, and all release files should be intentionally staged or committed.
 
 ## Review Release Contents
@@ -32,9 +39,10 @@ ledger state should appear, and all release files should be intentionally staged
 - Confirm the regression suite covers reviewer workspace/preflight, canonical packet recording,
   retryable reviewer infrastructure failures, loop action output, evidence schema ergonomics,
   status/explain diagnostics, evidence validity scope, and raw review retention.
-- Confirm `scripts/verify.sh` runs the regression suite, syntax checks, manifest/marketplace
-  validation, MCP launcher self-check, hook health, git hygiene, and generated-file checks with
-  exact generated-artifact diagnostics.
+- Confirm pytest covers manifest/marketplace validation, MCP launcher self-check, generated-file
+  checks, release-source hygiene, and ignored local Mobius state.
+- Confirm CI runs Python syntax, pytest, hook health, and Git hygiene as direct workflow steps
+  rather than through a shell verification wrapper.
 - Confirm release-facing docs describe the compact packet model, replayable evidence metadata,
   fail-closed MobiusCV behavior, retryable/non-retryable reviewer infrastructure failures,
   repairable final-evidence refresh, and raw review retention policy.
