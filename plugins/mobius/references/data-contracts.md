@@ -172,6 +172,29 @@ Each required row must define:
 Ambiguous pass language must be tied to concrete observable outcomes or validation rejects the
 contract.
 
+Agentic planning checks live inside these existing JSON cells and acceptance fields. Use
+`scope_json.non_goals`, `scope_json.invariants`, `gate_json.review_focus`, `recovery_json`,
+`budget_json.stop_condition`, and `acceptance.review_focus_json` to express assumptions, known
+unknowns, blind spots, disconfirming observations, minimum sufficient evidence, feedback signals,
+and stop conditions. They are not a separate state model and do not create new CSV ledgers,
+reviewer result fields, packet schemas, or loop modes.
+
+`review_focus_json` may remain a list of strings for simple cases, but object entries are preferred
+when the acceptance risk needs durable reviewer attention:
+
+```json
+{
+  "question": "What evidence would falsify this acceptance?",
+  "blind_spot": "happy-path-only evidence",
+  "counterevidence": "negative or boundary case fails",
+  "expected_signal": "test_result or command_result covers the boundary"
+}
+```
+
+Do not add mirror ledgers such as cognition, risk, decision, feedback, blind-spot, gate, recovery,
+or proof-obligation ledgers. The source of truth remains the locked contract, objective evidence,
+one-shot packet index, recorded CV rows, loop state, and derived verdict.
+
 ## Existing Ledgers
 
 Mobius keeps these surrounding ledgers unchanged except for verdict diagnostics:
