@@ -49,13 +49,29 @@ requires all policy-required reviewers to complete with pass, full required-acce
 degraded reviewers, and no failing completed reviewer.
 
 Recorded reviewer output is verification input for the CLI loop. Concrete revisions, missing
-evidence, stale packets, and retryable reviewer failures are returned as loop actions for the
-agent to repair or rerun. MobiusCV records the review result; it does not mutate `loop.csv` outside
-the CLI persistence API and it does not decide final acceptance.
+evidence, stale packets, and reviewer failures are returned as loop actions for the agent to repair
+or rerun. MobiusCV records valid reviewer judgments through the CLI persistence API; it does not
+mutate `loop.csv` directly and it does not decide final acceptance.
+
+Only completed reviewer outputs are valid CV judgments. Reviewer infrastructure failures such as
+missing CLI, auth failure, timeout, invalid output, or unavailable workspace are not `cv.csv` rows.
+Preflight can fail closed before an attempt starts; failures after a review attempt starts are
+recorded as failed `review_attempts.csv` attempts with `failure_kind`, `retryable`,
+`diagnostic_ref`, and `retry_count`. The packet remains unreviewed,
+`packet_has_recorded_review` stays false, and `continue`/`ledger-audit` route retryable attempts
+to `retry_review`; non-retryable reviewer infrastructure failures stop at `fix_reviewer_infra`.
 
 An exit review `fail` with checked active acceptance ids is repair input. The CLI routes the
 earliest affected stage back to `running`; it does not turn ordinary repairable exit feedback into
 a terminal blocked goal.
+
+An exit review `blocked` is classified before terminal state is written. Stale `file_ref` hashes,
+final command/test evidence that predates current source changes, stale packet refs, missing final
+evidence, generated Python artifacts, and similar mechanical final-state problems are
+`repairable_blocked`; Mobius keeps the goal active and routes the loop to `refresh_final_evidence`
+or fresh exit packet creation. Review findings prefixed with `contract_change_required:` route to
+contract repair without writing terminal `blocked`. Only true terminal blockers write terminal
+`blocked`.
 
 The MCP cannot directly invoke the current Codex host subagent. Use
 `mobius_cv_build_subagent_prompt`, run the host subagent with that prompt, then pass the structured
@@ -63,6 +79,9 @@ result to the recorded review tool.
 
 Recorded review tools fail fast when `codex_subagent_result` is missing. They do not run external
 reviewers, write `cv.csv`, or consume the packet until the host subagent result is provided.
+After the host subagent returns, the caller records the review result and closes the completed
+subagent. The close step applies after pass, fail, blocked, timeout, infra failure, or persistence
+error so reviewer process slots do not remain an implicit manual cleanup burden.
 
 ## Kimi Adapter
 
@@ -109,11 +128,18 @@ requiring Kimi run the real review command and degrade closed on auth, timeout, 
 Startup health remains diagnostic: a transient health failure does not permanently block later review
 attempts in the same MCP process.
 
-Kimi invocations run from a temporary directory, in an isolated process group, with nested MobiusCV
-startup smoke disabled. MobiusCV cleans up the process group after success or timeout.
-Because Kimi runs outside the project root, MobiusCV includes reviewer-local path context in the
-prompt, including the absolute project root and absolute ledger root. The packet itself remains
+Kimi review invocations run from the explicit `project_root` workspace, in an isolated process
+group, with nested MobiusCV startup smoke disabled. MobiusCV cleans up the process group after
+success or timeout. The prompt includes reviewer-local path context with the absolute project root,
+absolute ledger root, and root-relative packet ledger path. The packet itself remains
 root-relative and unchanged; the context is only for resolving local file references during review.
+
+Before `exit_strict` can start reviewer execution or consume an exit-review packet, MobiusCV runs a
+fail-closed workspace preflight. The preflight checks that Kimi is installed, prompt mode is
+available, the packet ledger root resolves to the active goal directory, required ledger files are
+visible, and any packet `file_ref` refs still point to project-root-relative files visible from the
+reviewer workspace. A failed preflight returns `ok=false` / `persisted=false`, does not start a
+review attempt, does not write `cv.csv`, and does not mark the packet as reviewed.
 
 Review execution uses three timeout classes:
 
@@ -152,8 +178,8 @@ invalid output and are recorded as degraded reviewer results.
 mobius_cv_health({ deep?: boolean, include_commands?: boolean }) -> mobius.cv_health
 mobius_cv_registry({}) -> mobius.cv_registry
 mobius_cv_build_subagent_prompt(packet, review_mode) -> mobius.cv_subagent_prompt
-mobius_cv_record_delta_review(project_root, session_id, goal_slug, target_plan_item_id, packet, level=1, ...) -> mobius.cv_recorded_result
-mobius_cv_record_exit_review(project_root, session_id, goal_slug, packet, ...) -> mobius.cv_recorded_result
+mobius_cv_record_delta_review(project_root, session_id, goal_slug, target_plan_item_id, packet|packet_id, level=1, ...) -> mobius.cv_recorded_result
+mobius_cv_record_exit_review(project_root, session_id, goal_slug, packet|packet_id, ...) -> mobius.cv_recorded_result
 ```
 
 Recorded review tools validate:
@@ -169,8 +195,14 @@ Recorded review tools validate:
 - delta review target ids match all linked required acceptance ids for the selected stage.
 - `codex_subagent_result` is present before any external reviewer runs.
 - pass results include the canonical `input_refs.review_policy` used for aggregation.
-- raw reviewer output, when present, is written to a local `raw_reviews/*.json` artifact while
-  `cv.csv` stores only `raw_ref` and `raw_hash_tail`.
+- raw reviewer output is stripped from `reviewers_json`; pass rows keep only `raw_hash_tail` by
+  default, while non-pass rows retain a local `raw_reviews/*.json` artifact referenced by `raw_ref`.
+  Full raw retention for pass rows is reserved for explicit local audit/debug runs via
+  `MOBIUS_CV_RETAIN_PASS_RAW=1`.
+
+Recorded review tools accept either a packet envelope, a canonical `packet-read` command result, or
+`packet_id`. When `packet_id` is supplied, MobiusCV loads the frozen packet from `packets.csv`
+before validation. Hand-mutated packet envelopes still fail strict packet hash validation.
 
 Review prompts require reviewers to inspect `scope_json`, `work_json`, `gate_json`,
 `recovery_json`, `budget_json`, `acceptance_ids_json`, `evidence_required_json`, `verifier_json`,
@@ -208,8 +240,10 @@ Pass a JSON object:
 
 `ledger.root` and all evidence labels are root-relative. `ledger.hash` and ref hashes are short
 local sanity checks; full hashes remain in the local ledgers. Do not pass CSV ledger rows as packet
-input. After any revision, retry, or rerun, call `packet-create` again and pass the new packet
-object.
+input. After any evidence or implementation revision, call `packet-create` again and pass the new
+packet object or `packet_id`. After a reviewer infrastructure failure, retry the outstanding packet
+reported by `packet-read`; do not create a replacement packet unless the loop reports
+`create_new_packet`.
 
 ## Recorded Result
 
@@ -247,7 +281,8 @@ review state.
 ## Review Attempts
 
 MobiusCV records attempt lifecycle in `review_attempts.csv`. A normal successful review moves from
-`started` to `recorded`. Failed validation or persistence moves to `failed`. Keyboard interruption
-moves to `interrupted` when the MCP process can catch it; a lingering `started` attempt with no
-`finished_at` is surfaced by `ledger-audit` as an interrupted/open attempt so the user can retry the
-outstanding packet instead of seeing a silent pending state.
+`started` to `recorded`. Failed validation or persistence moves to `failed` with structured
+diagnostics. Keyboard interruption moves to `interrupted` when the MCP process can catch it; a
+lingering `started` attempt with no `finished_at` is surfaced by `ledger-audit` as an
+interrupted/open attempt so the user can retry the outstanding packet instead of seeing a silent
+pending state.

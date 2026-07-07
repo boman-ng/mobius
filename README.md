@@ -26,7 +26,7 @@ confidence. It does not send project state to a hosted Mobius service.
 Add the repository marketplace, then install the plugin:
 
 ```bash
-codex plugin marketplace add boman-ng/mobius --ref v0.1.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
+codex plugin marketplace add boman-ng/mobius --ref v0.2.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
 codex plugin add mobius@mobius
 ```
 
@@ -69,6 +69,30 @@ $mobius:mobius-loop <path-to-plan.csv>
 
 Mobius records project-local execution state outside source control. This repository ignores that
 state because it is local evidence and ledger data, not release source.
+
+## Review And Evidence Guarantees
+
+Mobius keeps one normal path for a goal:
+
+1. Lock a plan and acceptance matrix.
+2. Record objective evidence with compact structured metadata.
+3. Create a frozen packet index from local ledgers.
+4. Run a stateless MobiusCV review for each stage.
+5. Run strict exit review before final acceptance.
+
+Packets are compact indexes, not evidence archives. They contain ledger refs and short hash tails;
+full command output, diffs, file contents, and full hashes remain local. Command and test evidence
+can include replay metadata such as command string, argv, cwd, selected environment metadata, exit
+code, duration, output refs, `recorded_at`, and optional `validity_scope` values for `stage`,
+`final`, or `historical` proof.
+
+MobiusCV fails closed. Missing, invalid, unchecked, degraded, or unavailable reviewer output is not
+recorded as a passing CV judgment. Reviewer infrastructure failures remain retryable review
+attempts when retryable and do not consume a packet as reviewed; non-retryable reviewer
+infrastructure failures are surfaced as compact `review_attempts.csv` diagnostics. Repairable final
+review blockers such as stale `file_ref` hashes or generated Python artifacts route back to final
+evidence refresh instead of making the goal terminal. Passing review rows store compact raw-output
+hash metadata by default; non-pass rows retain local `raw_reviews/*.json` artifacts for audit.
 
 ## Verification
 

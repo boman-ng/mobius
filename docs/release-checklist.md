@@ -1,6 +1,6 @@
 # Release Checklist
 
-Use this checklist before tagging `v0.1.0`.
+Use this checklist before tagging `v0.2.0`.
 
 ## Verify
 
@@ -16,7 +16,7 @@ ledger state should appear, and all release files should be intentionally staged
 
 ## Review Release Contents
 
-- Confirm `plugins/mobius/.codex-plugin/plugin.json` has version `0.1.0`, repository metadata,
+- Confirm `plugins/mobius/.codex-plugin/plugin.json` has version `0.2.0`, repository metadata,
   `Apache-2.0` license metadata, `./skills/`, and `./.mcp.json`.
 - Confirm `.agents/plugins/marketplace.json` points to `./plugins/mobius` with installation
   `AVAILABLE` and authentication `ON_INSTALL`.
@@ -27,11 +27,25 @@ ledger state should appear, and all release files should be intentionally staged
 - Run the MCP launcher self-check with a clean `PLUGIN_DATA` directory if the installed cache has
   changed.
 
+## Review Hardening Coverage
+
+- Confirm the regression suite covers reviewer workspace/preflight, canonical packet recording,
+  retryable reviewer infrastructure failures, loop action output, evidence schema ergonomics,
+  status/explain diagnostics, evidence validity scope, and raw review retention.
+- Confirm `scripts/verify.sh` runs the regression suite, syntax checks, manifest/marketplace
+  validation, MCP launcher self-check, hook health, git hygiene, and generated-file checks with
+  exact generated-artifact diagnostics.
+- Confirm release-facing docs describe the compact packet model, replayable evidence metadata,
+  fail-closed MobiusCV behavior, retryable/non-retryable reviewer infrastructure failures,
+  repairable final-evidence refresh, and raw review retention policy.
+- Confirm no `.mobius` ledger state, generated environments, bytecode, local cache paths, personal
+  home paths, or secrets are visible in `git status --short --ignored=no`.
+
 ## Tag
 
 ```bash
-git tag -a v0.1.0 -m "Mobius v0.1.0"
-git push origin v0.1.0
+git tag -a v0.2.0 -m "Mobius v0.2.0"
+git push origin v0.2.0
 ```
 
 ## Install Or Refresh
@@ -39,7 +53,7 @@ git push origin v0.1.0
 Install from the pinned tag:
 
 ```bash
-codex plugin marketplace add boman-ng/mobius --ref v0.1.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
+codex plugin marketplace add boman-ng/mobius --ref v0.2.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
 codex plugin add mobius@mobius
 ```
 

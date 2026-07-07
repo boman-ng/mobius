@@ -92,6 +92,8 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> con
 ```
 
 7. Continue with `mobius-loop`.
+Use `status` for goal discovery and `explain --session-id ... --goal-slug ...` for a concise
+diagnostic summary instead of reading CSV ledgers directly during routine planning or handoff.
 
 ## Rules
 

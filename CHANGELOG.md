@@ -2,6 +2,22 @@
 
 All notable changes to Mobius are documented here.
 
+## 0.2.0 - 2026-07-07
+
+- Harden MobiusCV review recording with reviewer workspace preflight, canonical packet loading,
+  retryable reviewer infrastructure failures, and explicit subagent lifecycle guidance.
+- Add loop diagnostics for machine-usable next actions and human-readable status explanation.
+- Add structured evidence ergonomics, validity scopes, compact replay metadata, and raw review
+  retention rules for pass and non-pass reviews.
+- Expand regression coverage for the Soma-session failure categories and include it in the local
+  release gate.
+- Route repairable exit `blocked` reviews back to final evidence refresh instead of terminal
+  goal blockage, while preserving true terminal blocked verdicts.
+- Add deterministic final-evidence freshness checks for exit packets and compact diagnostics for
+  generated Python artifacts before expensive external review.
+- Add structured review-attempt diagnostics for failure kind, retryability, diagnostic refs, and
+  retry counts.
+
 ## 0.1.0 - 2026-07-06
 
 - Package Mobius as a repo-distributed Codex plugin.
