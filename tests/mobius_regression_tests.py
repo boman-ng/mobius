@@ -2867,6 +2867,20 @@ def test_mobius_cv_prompt_allows_autonomous_review_tools() -> None:
     assert "packet refs as starting points" in prompt
     assert "not exclusive evidence" in prompt
     assert "packet.refs" in prompt
+    assert "stateless MobiusCV reviewer" in prompt
+    assert "read-only" in prompt
+    assert "assumptions" in prompt
+    assert "blind spots" in prompt
+    assert "counterevidence" in prompt
+    assert "disconfirming observation" in prompt
+    assert "would falsify the acceptance claim" in prompt
+    assert "Every checked required acceptance id" in prompt
+    assert "sensor quality" in prompt
+    assert "Goodhart or proxy risk" in prompt
+    assert "variety coverage" in prompt
+    assert "contract drift" in prompt
+    assert "confidence-only completion is not pass" in prompt
+    assert "compatibility, fallback, alias, glue, or history-preserving code" in prompt
     assert "MOBIUS_CV_REVIEWER_RESULT" in prompt
     assert prompt.rstrip().endswith("END_MOBIUS_CV_REVIEWER_RESULT")
     context_prompt = module.review_prompt(
@@ -3487,19 +3501,42 @@ def test_public_docs_skills_and_verify_surface() -> None:
     plan_skill = (ROOT / "skills" / "mobius-plan" / "SKILL.md").read_text(encoding="utf-8")
     assert "MobiusCV is a verifier, not objective evidence" in plan_skill
     assert '"evidence_required":[{"type":"mobiuscv_delta"' not in plan_skill
+    assert "Agentic Contract Shape" in plan_skill
+    assert "first principles" in plan_skill
+    assert "Minimum sufficient evidence" in plan_skill
+    assert "Disconfirming observation" in plan_skill
+    assert "Blind spot to inspect" in plan_skill
+    assert "known unknowns" in plan_skill
+    assert "review_focus" in plan_skill
+    assert "cognition ledger" in plan_skill
+    for matrix_row in ["Objective:", "Constraints:", "Inputs:", "Outputs:", "Invariants:", "Risks:"]:
+        assert matrix_row in plan_skill
 
     loop_skill = (ROOT / "skills" / "mobius-loop" / "SKILL.md").read_text(encoding="utf-8")
     assert "Full Plan Loop" in loop_skill
+    assert "Stage Control Check" in loop_skill
+    for phase in ["Observe:", "Orient:", "Act:", "Evidence:", "Review:", "Continue/Stop:"]:
+        assert phase in loop_skill
+    assert "not a new user" in loop_skill
     assert "Default to full-plan loop execution" in loop_skill
     assert "Do not stop after a passed delta gate" in loop_skill
+    assert "prune obsolete wrong-path artifacts" in loop_skill
     assert "mobius.loop" in docs_text
     assert "packet-read" in docs_text
+    assert "do not create new CSV ledgers" in docs_text
+    assert "does not add separate blind-spot" in docs_text
+    assert "Goodhart or proxy risk" in docs_text
 
     plan_yaml = (ROOT / "skills" / "mobius-plan" / "agents" / "openai.yaml").read_text(encoding="utf-8")
     loop_yaml = (ROOT / "skills" / "mobius-loop" / "agents" / "openai.yaml").read_text(encoding="utf-8")
     assert 'value: "mobius-cv"' not in plan_yaml
+    assert "falsifiable acceptance" in plan_yaml
+    assert "blind-spot checks" in plan_yaml
     assert 'type: "mcp"' in loop_yaml
     assert 'value: "mobius-cv"' in loop_yaml
+    assert "full locked Mobius plan loop" in loop_yaml
+    assert "Run one explicit Mobius goal stage" not in loop_yaml
+    assert "Run the next Mobius plan stage through review" not in loop_yaml
 
     verify = (REPO_ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
     assert re.search(r"/home/[A-Za-z0-9_.-]+", verify) is None
