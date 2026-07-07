@@ -1,4 +1,4 @@
 interface:
   display_name: "Mobius Plan"
   short_description: "Create explicit Mobius goal contracts"
-  default_prompt: "Create a Mobius goal and acceptance matrix."
+  default_prompt: "Create a Mobius goal contract with falsifiable acceptance, minimum evidence, and blind-spot checks."
