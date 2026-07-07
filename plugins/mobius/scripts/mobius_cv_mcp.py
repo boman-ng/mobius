@@ -29,7 +29,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import mobius
 
 
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 RESULT_SCHEMA = "mobius.cv_result"
 REVIEWER_SCHEMA = "mobius.cv_reviewer_result"
 VALID_REVIEW_MODES = {"delta_review", "exit_review"}

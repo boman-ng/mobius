@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-MOBIUS_VERSION = "0.2.0"
+MOBIUS_VERSION = "0.3.0"
 ACCEPTANCE_RULE = "accepted iff every required plan and acceptance row is locked, and every required acceptance item is pass and backed by a stateless non-degraded MobiusCV MCP exit_review"
 
 RUN_FIELDS = ["schema", "run_id", "codex_session_id", "project_root", "created_at", "mobius_version", "codex_json", "goals_json"]
