@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-MOBIUS_VERSION = "0.1.0"
+MOBIUS_VERSION = "0.2.0"
 ACCEPTANCE_RULE = "accepted iff every required plan and acceptance row is locked, and every required acceptance item is pass and backed by a stateless non-degraded MobiusCV MCP exit_review"
 
 RUN_FIELDS = ["schema", "run_id", "codex_session_id", "project_root", "created_at", "mobius_version", "codex_json", "goals_json"]
@@ -122,6 +122,10 @@ REVIEW_ATTEMPT_FIELDS = [
     "started_at",
     "finished_at",
     "reviewer_summary_ref",
+    "failure_kind",
+    "retryable",
+    "diagnostic_ref",
+    "retry_count",
 ]
 CV_FIELDS = [
     "schema",
@@ -181,7 +185,20 @@ VERIFIER_TYPES = EVIDENCE_TYPES | REVIEW_VERIFIER_TYPES
 STRUCTURED_PROOF_TYPES = EVIDENCE_TYPES - {"human_assertion"}
 PATH_PROOF_TYPES = {"file_ref"}
 CHANGE_SET_SCOPE_COVERAGE = {"tracked", "staged", "untracked", "intent_to_add"}
+EVIDENCE_VALIDITY_SCOPES = {"stage", "final", "historical"}
 LOOP_STOP_REASONS = {"review_blocked", "repair_budget_exhausted", "contract_change_required", "no_runnable_action"}
+EXIT_BLOCKER_KINDS = {"repairable_blocked", "contract_change_required", "infra_blocked", "terminal_blocked"}
+
+REPAIRABLE_EXIT_BLOCKER_PATTERN = re.compile(
+    r"stale|hash mismatch|generated runtime|__pycache__|[.]pyc\b|packet refs|packet/evidence|"
+    r"missing final|refresh final|verify[.]sh fails|file_ref|evidence.*stale",
+    re.IGNORECASE,
+)
+TERMINAL_EXIT_BLOCKER_PATTERN = re.compile(
+    r"terminal_blocked:|policy contradiction|impossible acceptance|explicit user stop|repair_budget_exhausted",
+    re.IGNORECASE,
+)
+CONTRACT_CHANGE_REQUIRED_PATTERN = re.compile(r"contract_change_required:|contract change required", re.IGNORECASE)
 
 STATE_TRANSITIONS = {
     "goal": {
@@ -643,6 +660,12 @@ def artifact_json_record(root: Path, artifact_json: str, evidence_type: str) -> 
     effective_type = str(parsed.get("type") or evidence_type)
     if effective_type not in EVIDENCE_TYPES:
         raise MobiusError(f"unsupported artifact-json evidence type: {effective_type}")
+    if "validity_scope" in parsed:
+        validity_scope = str(parsed.get("validity_scope", "")).strip()
+        if validity_scope not in EVIDENCE_VALIDITY_SCOPES:
+            raise MobiusError("artifact-json.validity_scope must be one of: " + sorted_join(EVIDENCE_VALIDITY_SCOPES))
+        parsed = dict(parsed)
+        parsed["validity_scope"] = validity_scope
     if parsed.get("path") and effective_type not in PATH_PROOF_TYPES:
         raise MobiusError(f"artifact-json path refs are only allowed for evidence types: {sorted_join(PATH_PROOF_TYPES)}")
     if parsed.get("path"):
@@ -661,7 +684,10 @@ def artifact_json_record(root: Path, artifact_json: str, evidence_type: str) -> 
     if evidence_type == "change_set_scope":
         coverage = parsed.get("coverage")
         if not isinstance(coverage, dict):
-            raise MobiusError("change_set_scope evidence requires artifact-json.coverage")
+            raise MobiusError(
+                "change_set_scope evidence requires artifact-json.coverage object with true boolean keys: "
+                + ",".join(sorted(CHANGE_SET_SCOPE_COVERAGE))
+            )
         missing = sorted(CHANGE_SET_SCOPE_COVERAGE - set(str(key) for key in coverage))
         if missing:
             raise MobiusError("change_set_scope coverage missing: " + ",".join(missing))
@@ -729,6 +755,160 @@ def evidence_refs_for_packet(goal_dir: Path, required_ids: list[str]) -> dict[st
                 label = str(artifact["command"])
         refs[evidence_id] = [evidence_type, label, short_hash_ref(hash_source)]
     return refs
+
+
+def generated_python_artifacts(root: Path) -> list[str]:
+    plugin = root / "plugins" / "mobius"
+    if not plugin.exists():
+        return []
+    artifacts: list[str] = []
+    for path in plugin.rglob("*"):
+        if path.is_dir() and path.name == "__pycache__":
+            artifacts.append(path.relative_to(root).as_posix())
+        elif path.is_file() and path.suffix == ".pyc":
+            artifacts.append(path.relative_to(root).as_posix())
+    return sorted(artifacts)
+
+
+def evidence_rows_for_acceptance_ids(goal_dir: Path, acceptance_ids: list[str]) -> list[dict[str, str]]:
+    required = {str(item) for item in acceptance_ids}
+    rows: list[dict[str, str]] = []
+    for row in read_csv_rows(goal_dir / "evidence.csv"):
+        try:
+            supports = from_json_cell(row.get("supports_json", ""), [])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(supports, list) and required.intersection(str(item) for item in supports):
+            rows.append(row)
+    return rows
+
+
+def final_evidence_preflight_errors(goal_dir: Path, acceptance_ids: list[str]) -> list[str]:
+    root = project_root_from_goal_dir(goal_dir)
+    errors: list[str] = []
+    for artifact in generated_python_artifacts(root):
+        errors.append(
+            "generated runtime artifact in plugin source tree: "
+            + artifact
+            + "; run Mobius Python entrypoints with PYTHONDONTWRITEBYTECODE=1 or PYTHONPYCACHEPREFIX outside plugins/mobius"
+        )
+    for row in evidence_rows_for_acceptance_ids(goal_dir, acceptance_ids):
+        if row.get("type") != "file_ref":
+            continue
+        evidence_id = row.get("id", "")
+        artifact = evidence_artifact(row)
+        rel_path = str(artifact.get("path", "")).strip()
+        recorded_sha = str(artifact.get("sha256", "")).strip()
+        if not rel_path or not recorded_sha:
+            continue
+        path_errors = root_relative_path_errors(f"evidence.csv:{evidence_id}:path", [rel_path])
+        if path_errors:
+            errors.extend(path_errors)
+            continue
+        current_path = root / rel_path
+        if not current_path.is_file():
+            errors.append(f"file_ref {evidence_id} is not current final evidence: {rel_path} is missing")
+            continue
+        current_sha = sha256_file(current_path)
+        if current_sha != recorded_sha:
+            errors.append(
+                f"file_ref {evidence_id} is stale: {rel_path} recorded {recorded_sha} but current {current_sha}; "
+                "refresh final evidence and create a new exit packet"
+            )
+    evidence_rows = evidence_rows_for_acceptance_ids(goal_dir, acceptance_ids)
+    evidence_by_acceptance: dict[str, list[dict[str, str]]] = {}
+    for row in evidence_rows:
+        try:
+            supports = from_json_cell(row.get("supports_json", ""), [])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(supports, list):
+            for acceptance_id in supports:
+                evidence_by_acceptance.setdefault(str(acceptance_id), []).append(row)
+    acceptance = active_acceptance_by_id(goal_dir)
+    for acceptance_id in [str(item) for item in acceptance_ids]:
+        row = acceptance.get(acceptance_id, {})
+        for required in required_evidence_items(row):
+            if str(required.get("validity_scope", "")).strip() != "final":
+                continue
+            if not any(evidence_matches_required_item(evidence, required) for evidence in evidence_by_acceptance.get(acceptance_id, [])):
+                errors.append(f"acceptance {acceptance_id} is missing final-scoped evidence; refresh final evidence")
+
+    source_mtime = latest_source_mtime(root)
+    for row in evidence_rows_for_acceptance_ids(goal_dir, acceptance_ids):
+        if row.get("type") not in {"command_result", "test_result"}:
+            continue
+        evidence_id = row.get("id", "")
+        artifact = evidence_artifact(row)
+        if artifact.get("validity_scope") != "final":
+            continue
+        recorded_at = str(artifact.get("recorded_at") or row.get("created_at", "")).strip()
+        if not recorded_at:
+            errors.append(f"{row.get('type')} {evidence_id} final evidence is missing recorded_at; refresh final evidence")
+            continue
+        try:
+            recorded_dt = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+        except ValueError:
+            errors.append(f"{row.get('type')} {evidence_id} final evidence has invalid recorded_at: {recorded_at}")
+            continue
+        if recorded_dt.tzinfo is None:
+            recorded_dt = recorded_dt.replace(tzinfo=timezone.utc)
+        if source_mtime and recorded_dt.timestamp() < source_mtime:
+            errors.append(
+                f"{row.get('type')} {evidence_id} final evidence predates current source changes; "
+                "rerun the command and create a new exit packet"
+            )
+    return errors
+
+
+def latest_source_mtime(root: Path) -> float:
+    ignored_parts = {".git", ".mobius", ".venv", "__pycache__"}
+    latest = 0.0
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel_parts = path.relative_to(root).parts
+        if any(part in ignored_parts for part in rel_parts):
+            continue
+        if path.suffix == ".pyc":
+            continue
+        latest = max(latest, path.stat().st_mtime)
+    return latest
+
+
+def exit_blocker_kind(result: dict[str, Any], comparison: dict[str, Any] | None = None) -> str:
+    comparison = comparison if isinstance(comparison, dict) else {}
+    if comparison.get("degraded_reviewers"):
+        return "infra_blocked"
+    if result.get("unchecked_acceptance_ids"):
+        return "repairable_blocked"
+    findings = " ".join(
+        str(item)
+        for item in [
+            *(result.get("blocking_findings", []) or []),
+            *(result.get("required_revisions", []) or []),
+        ]
+    )
+    if CONTRACT_CHANGE_REQUIRED_PATTERN.search(findings):
+        return "contract_change_required"
+    if TERMINAL_EXIT_BLOCKER_PATTERN.search(findings):
+        return "terminal_blocked"
+    if REPAIRABLE_EXIT_BLOCKER_PATTERN.search(findings):
+        return "repairable_blocked"
+    return "terminal_blocked"
+
+
+def repair_action_for_exit_blocker(kind: str, result: dict[str, Any]) -> str:
+    if kind in {"repairable_blocked", "infra_blocked"}:
+        findings = " ".join(str(item) for item in result.get("blocking_findings", []) or [])
+        if REPAIRABLE_EXIT_BLOCKER_PATTERN.search(findings):
+            return "refresh_final_evidence"
+        if result.get("unchecked_acceptance_ids"):
+            return "create_new_packet"
+        return "create_new_packet"
+    if kind == "contract_change_required":
+        return "needs_contract_change"
+    return "goal_blocked"
 
 def structural_hash(row: dict[str, str], fields: list[str]) -> str:
     material = {field: row.get(field, "") for field in fields}
@@ -1464,6 +1644,25 @@ def cmd_evidence_add(args: argparse.Namespace) -> int:
         return 2
     goal = read_single_csv(goal_dir / "goal.csv") or {}
     evidence_path = goal_dir / "evidence.csv"
+    supports: list[str] = []
+    if args.supports_json:
+        try:
+            parsed_supports = json.loads(args.supports_json)
+        except json.JSONDecodeError as exc:
+            json_print(command_result("evidence-add", ok=False, goal_dir=goal_dir, errors=[f"--supports-json must be a JSON string or array of strings: {exc.msg}"], next_required_action="fix_evidence_contract"))
+            return 2
+        if isinstance(parsed_supports, str):
+            supports.append(parsed_supports)
+        elif isinstance(parsed_supports, list) and all(isinstance(item, str) for item in parsed_supports):
+            supports.extend(parsed_supports)
+        else:
+            json_print(command_result("evidence-add", ok=False, goal_dir=goal_dir, errors=["--supports-json must be a JSON string or array of strings"], next_required_action="fix_evidence_contract"))
+            return 2
+    supports.extend(str(item) for item in (args.supports or []))
+    supports = [item for item in supports if item.strip()]
+    if not supports:
+        json_print(command_result("evidence-add", ok=False, goal_dir=goal_dir, errors=["at least one --supports or --supports-json value is required"], next_required_action="fix_evidence_contract"))
+        return 2
     artifact = None
     if args.artifact_json:
         try:
@@ -1495,7 +1694,7 @@ def cmd_evidence_add(args: argparse.Namespace) -> int:
         "goal_id": goal.get("goal_id", ""),
         "type": args.type,
         "summary": args.summary,
-        "supports_json": as_json_cell(args.supports),
+        "supports_json": as_json_cell(supports),
         "artifact_json": as_json_cell(artifact),
         "created_by": args.created_by,
         "created_at": now_iso(),
@@ -1710,6 +1909,13 @@ def validate_typed_contract_items(
                 f"{path_name}:{row_id}: unsupported {type_label} type in {field}[{index}]: "
                 f"{item_type}; supported types: {sorted_join(allowed_types)}"
             )
+        if field == "evidence_required_json" and "validity_scope" in item:
+            validity_scope = str(item.get("validity_scope", "")).strip()
+            if validity_scope not in EVIDENCE_VALIDITY_SCOPES:
+                errors.append(
+                    f"{path_name}:{row_id}: {field}[{index}].validity_scope must be one of: "
+                    f"{sorted_join(EVIDENCE_VALIDITY_SCOPES)}"
+                )
 
 
 def detect_dependency_cycle(graph: dict[str, list[str]]) -> list[str]:
@@ -2345,6 +2551,19 @@ def cmd_packet_create(args: argparse.Namespace) -> int:
             return 2
     goal = read_single_csv(goal_dir / "goal.csv") or {}
     scope = target_plan_item_id if args.review_mode == "delta_review" else "all"
+    if args.review_mode == "exit_review":
+        preflight_errors = final_evidence_preflight_errors(goal_dir, required_ids)
+        if preflight_errors:
+            json_print(
+                command_result(
+                    "packet-create",
+                    ok=False,
+                    goal_dir=goal_dir,
+                    errors=preflight_errors,
+                    next_required_action="refresh_final_evidence",
+                )
+            )
+            return 2
     envelope = packet_envelope(root, goal_dir, packet_id, args.goal_slug, args.review_mode, scope, required_ids)
     row = {
         "schema": "mobius.packet",
@@ -2652,6 +2871,16 @@ def validate_cv_envelope(
         errors.append("comparison.degraded_reviewers must be a list")
     elif overall == "pass" and degraded:
         errors.append("pass result cannot contain degraded_reviewers")
+    non_completed_reviewers = [
+        f"{str(item.get('reviewer_id', 'unknown'))}({str(item.get('status', ''))})"
+        for item in reviewers
+        if isinstance(item, dict) and item.get("status") != "completed"
+    ]
+    if non_completed_reviewers:
+        errors.append(
+            "reviewer infrastructure failures cannot be recorded in cv.csv; degraded_reviewers="
+            + ",".join(non_completed_reviewers)
+        )
     level = cv_result.get("level")
     try:
         level_int = int(level)
@@ -2826,6 +3055,8 @@ def validate_packet_for_goal(
                 errors.extend(f"packet refs.{evidence_id} {error}" for error in root_relative_path_errors("label", label_paths))
             if not re.fullmatch(r"h:[0-9a-f]{7}", hash_ref):
                 errors.append(f"packet refs.{evidence_id} hash ref must be 7 hex chars")
+    if expected_review_mode == "exit_review":
+        errors.extend(final_evidence_preflight_errors(goal_dir, [str(item) for item in expected_ids]))
     ledger = packet.get("ledger")
     if not isinstance(ledger, dict):
         errors.append("packet ledger must be an object")
@@ -2907,12 +3138,16 @@ def write_cv_raw_file(goal_dir: Path, cv_result: dict[str, Any]) -> tuple[str, s
         "reviewers": raw_reviewers,
     }
     text = json.dumps(raw_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    digest = sha256_text(text)
+    overall = str((cv_result.get("result") if isinstance(cv_result.get("result"), dict) else {}).get("overall", ""))
+    retain_pass_raw = os.environ.get("MOBIUS_CV_RETAIN_PASS_RAW", "").strip().lower() in {"1", "true", "yes", "on"}
+    if overall == "pass" and not retain_pass_raw:
+        return "", sha256_tail(digest)
     raw_dir = goal_dir / "raw_reviews"
     raw_dir.mkdir(parents=True, exist_ok=True)
     raw_path = raw_dir / f"{str(cv_result.get('cv_id', '') or 'cv')}.json"
     temp_path = write_text_temp(raw_path, text)
     os.replace(temp_path, raw_path)
-    digest = sha256_file(raw_path)
     raw_ref = raw_path.relative_to(project_root_from_goal_dir(goal_dir)).as_posix()
     return raw_ref, sha256_tail(digest)
 
@@ -2926,6 +3161,13 @@ def review_attempt_started(goal_dir: Path, packet_id: str, review_mode: str) -> 
     path = goal_dir / "review_attempts.csv"
     rows = read_csv_rows(path)
     attempt_id = f"attempt_{len(rows) + 1:03d}"
+    retry_count = len(
+        [
+            row
+            for row in rows
+            if row.get("packet_id") == packet_id and row.get("review_mode") == review_mode
+        ]
+    )
     rows.append(
         {
             "schema": "mobius.review_attempt",
@@ -2936,13 +3178,26 @@ def review_attempt_started(goal_dir: Path, packet_id: str, review_mode: str) -> 
             "started_at": now_iso(),
             "finished_at": "",
             "reviewer_summary_ref": "",
+            "failure_kind": "",
+            "retryable": "",
+            "diagnostic_ref": "",
+            "retry_count": str(retry_count),
         }
     )
     write_csv_rows(path, REVIEW_ATTEMPT_FIELDS, rows)
     return attempt_id
 
 
-def review_attempt_finished(goal_dir: Path, attempt_id: str, status: str, reviewer_summary_ref: str = "") -> None:
+def review_attempt_finished(
+    goal_dir: Path,
+    attempt_id: str,
+    status: str,
+    reviewer_summary_ref: str = "",
+    *,
+    failure_kind: str = "",
+    retryable: bool | None = None,
+    diagnostic_ref: str = "",
+) -> None:
     validate_state_value("review_attempt", status)
     if status == "started":
         raise MobiusError("review attempt finish status cannot be started")
@@ -2955,6 +3210,9 @@ def review_attempt_finished(goal_dir: Path, attempt_id: str, status: str, review
             row["status"] = status
             row["finished_at"] = now_iso()
             row["reviewer_summary_ref"] = reviewer_summary_ref
+            row["failure_kind"] = failure_kind if status == "failed" else ""
+            row["retryable"] = as_bool_cell(True if retryable is None else retryable) if status == "failed" else ""
+            row["diagnostic_ref"] = diagnostic_ref
             write_csv_rows(path, REVIEW_ATTEMPT_FIELDS, rows)
             return
     raise MobiusError(f"unknown review attempt id: {attempt_id}")
@@ -2979,6 +3237,34 @@ def visible_review_attempts(goal_dir: Path) -> dict[str, list[dict[str, str]]]:
         "interrupted_review_attempts": interrupted_attempts,
         "failed_review_attempts": failed_attempts,
     }
+
+
+def retryable_review_attempt_exists(goal_dir: Path, packet_id: str, review_mode: str) -> bool:
+    if not packet_id:
+        return False
+    attempts = visible_review_attempts(goal_dir)
+    retryable = [
+        *attempts["interrupted_review_attempts"],
+        *attempts["failed_review_attempts"],
+    ]
+    return any(
+        row.get("packet_id") == packet_id
+        and row.get("review_mode") == review_mode
+        and (row.get("status") == "interrupted" or from_bool_cell(row.get("retryable", ""), False))
+        for row in retryable
+    )
+
+
+def nonretryable_review_attempt_exists(goal_dir: Path, packet_id: str, review_mode: str) -> bool:
+    if not packet_id:
+        return False
+    return any(
+        row.get("packet_id") == packet_id
+        and row.get("review_mode") == review_mode
+        and row.get("status") == "failed"
+        and not from_bool_cell(row.get("retryable", ""), False)
+        for row in visible_review_attempts(goal_dir)["failed_review_attempts"]
+    )
 
 
 def canonical_cv_parts(cv: dict[str, str]) -> tuple[dict[str, Any], dict[str, Any], list[Any], dict[str, Any], list[str]]:
@@ -3208,6 +3494,9 @@ def evidence_matches_required_item(evidence: dict[str, str], required: dict[str,
     if required_type in STRUCTURED_PROOF_TYPES and not artifact:
         return False
     if required_type in PATH_PROOF_TYPES and not artifact.get("path"):
+        return False
+    required_scope = str(required.get("validity_scope", "")).strip()
+    if required_scope and artifact.get("validity_scope") != required_scope:
         return False
     required_name = str(required.get("name", "")).strip()
     if required_name:
@@ -3479,6 +3768,10 @@ def loop_action_for_plan_item(goal_dir: Path, row: dict[str, str]) -> dict[str, 
     if last_packet_id:
         if packet_has_recorded_review(goal_dir, last_packet_id):
             return {**base, "loop_gate": "running", "next_required_action": "create_new_packet"}
+        if retryable_review_attempt_exists(goal_dir, last_packet_id, "delta_review"):
+            return {**base, "loop_gate": "running", "next_required_action": "retry_review"}
+        if nonretryable_review_attempt_exists(goal_dir, last_packet_id, "delta_review"):
+            return {**base, "loop_gate": "blocked", "next_required_action": "fix_reviewer_infra"}
         return {**base, "loop_gate": "running", "next_required_action": "record_delta_review"}
 
     missing = target_unsatisfied_evidence(goal_dir, target_ids)
@@ -3500,16 +3793,26 @@ def ledger_audit_data(root: Path, session_id: str, goal_slug: str) -> dict[str, 
     exit_cv_id = cv_id_for_packet(goal_dir, latest_exit_packet, "exit_review")
     unverified_acceptance_ids = from_json_cell(str(derived.get("unverified_acceptance_ids_json", "")), [])
     attempt_visibility = visible_review_attempts(goal_dir)
-    interrupted_exit_attempts = [
+    retryable_exit_attempts = [
         row
-        for row in attempt_visibility["interrupted_review_attempts"]
+        for row in [*attempt_visibility["interrupted_review_attempts"], *attempt_visibility["failed_review_attempts"]]
         if row.get("review_mode") == "exit_review" and (not latest_exit_packet or row.get("packet_id") == latest_exit_packet)
+        and (row.get("status") == "interrupted" or from_bool_cell(row.get("retryable", ""), False))
+    ]
+    nonretryable_exit_attempts = [
+        row
+        for row in attempt_visibility["failed_review_attempts"]
+        if row.get("review_mode") == "exit_review" and (not latest_exit_packet or row.get("packet_id") == latest_exit_packet)
+        and not from_bool_cell(row.get("retryable", ""), False)
     ]
     loop_rows = sync_loop_with_plan(goal_dir, commit=False)
     next_plan_item_id = ""
     loop_context: dict[str, Any] = {}
     packet_id = ""
     review_mode = ""
+    repair_from_cv_id = ""
+    repair_findings: list[str] = []
+    missing_acceptance_ids: list[str] = []
     if terminal:
         loop_gate = terminal
     elif active_required_unlocked_ids(goal_dir):
@@ -3543,8 +3846,12 @@ def ledger_audit_data(root: Path, session_id: str, goal_slug: str) -> dict[str, 
     elif not latest_exit_packet:
         next_action = "create_exit_packet"
         review_mode = "exit_review"
-    elif interrupted_exit_attempts and not exit_cv_id:
+    elif retryable_exit_attempts and not exit_cv_id:
         next_action = "retry_review"
+        packet_id = latest_exit_packet
+        review_mode = "exit_review"
+    elif nonretryable_exit_attempts and not exit_cv_id:
+        next_action = "fix_reviewer_infra"
         packet_id = latest_exit_packet
         review_mode = "exit_review"
     elif not exit_cv_id:
@@ -3555,7 +3862,14 @@ def ledger_audit_data(root: Path, session_id: str, goal_slug: str) -> dict[str, 
         unverified_ids = [str(item) for item in unverified_acceptance_ids]
         exit_result = cv_result_by_id(goal_dir, exit_cv_id)
         exit_comparison = cv_comparison_by_id(goal_dir, exit_cv_id)
-        if (
+        if exit_result.get("overall") == "blocked":
+            blocker_kind = exit_blocker_kind(exit_result, exit_comparison)
+            next_action = repair_action_for_exit_blocker(blocker_kind, exit_result)
+            review_mode = "exit_review"
+            repair_from_cv_id = exit_cv_id
+            repair_findings = [f"exit_review {blocker_kind}: {item}" for item in exit_result.get("blocking_findings", []) or []]
+            missing_acceptance_ids = unverified_ids
+        elif (
             exit_result.get("overall") in {"fail", "unknown"}
             or exit_result.get("unchecked_acceptance_ids")
             or exit_comparison.get("degraded_reviewers")
@@ -3565,11 +3879,14 @@ def ledger_audit_data(root: Path, session_id: str, goal_slug: str) -> dict[str, 
         else:
             missing = target_unsatisfied_evidence(goal_dir, unverified_ids)
             next_action = missing_evidence_action(goal_dir, unverified_ids)
+            missing_acceptance_ids = missing
     else:
         next_action = "continue_loop"
     audit = {
         "schema": "mobius.ledger_audit",
         "goal_dir": str(goal_dir),
+        "session_id": session_id,
+        "goal_slug": goal_slug,
         "loop_gate": loop_gate,
         "terminal_verdict": terminal,
         "exit_cv_id": exit_cv_id,
@@ -3578,6 +3895,9 @@ def ledger_audit_data(root: Path, session_id: str, goal_slug: str) -> dict[str, 
         "unverified_acceptance_ids": unverified_acceptance_ids,
         "next_required_action": next_action,
         "next_plan_item_id": next_plan_item_id,
+        "repair_from_cv_id": repair_from_cv_id,
+        "repair_findings": repair_findings,
+        "missing_acceptance_ids": missing_acceptance_ids,
         **loop_context,
         **attempt_visibility,
         "derived_verdict": derived,
@@ -3606,6 +3926,7 @@ def loop_decision(audit: dict[str, Any]) -> dict[str, Any]:
         "record_exit_review": "packet-read",
         "retry_review": "packet-read",
         "create_new_packet": "packet-create",
+        "refresh_final_evidence": "evidence-add",
     }
     stop_reasons = {
         "completion_allowed": "no_runnable_action",
@@ -3613,6 +3934,7 @@ def loop_decision(audit: dict[str, Any]) -> dict[str, Any]:
         "needs_contract_change": "contract_change_required",
         "repair_budget_exhausted": "repair_budget_exhausted",
         "continue_loop": "no_runnable_action",
+        "fix_reviewer_infra": "review_blocked",
     }
     next_command = continuing_actions.get(next_action, "")
     if next_action in {"start_next_stage", "repair_stage"} and next_plan_item_id:
@@ -3636,8 +3958,9 @@ def loop_decision(audit: dict[str, Any]) -> dict[str, Any]:
         next_command = f"packet-create --review-mode delta_review {acceptance_args}".strip()
     elif next_action == "create_new_packet" and review_mode == "exit_review":
         next_command = "packet-create --review-mode exit_review"
-    elif next_action in {"record_missing_evidence", "run_missing_command_evidence"}:
+    elif next_action in {"record_missing_evidence", "run_missing_command_evidence", "refresh_final_evidence"}:
         next_command = "evidence-add"
+    next_argv, next_actions = loop_next_action_payload(audit, next_action, next_plan_item_id, packet_id, review_mode)
     return {
         "schema": "mobius.loop",
         "mode": "full_plan",
@@ -3645,6 +3968,8 @@ def loop_decision(audit: dict[str, Any]) -> dict[str, Any]:
         "agent_must_stop": next_action not in continuing_actions,
         "next_required_action": next_action,
         "next_command": next_command,
+        "next_argv": next_argv,
+        "next_actions": next_actions,
         "next_plan_item_id": next_plan_item_id,
         "packet_id": packet_id if next_action in {"record_delta_review", "record_exit_review", "retry_review"} else "",
         "review_mode": review_mode,
@@ -3656,6 +3981,90 @@ def loop_decision(audit: dict[str, Any]) -> dict[str, Any]:
         "terminal_verdict": terminal,
         "stop_reason": "" if next_action in continuing_actions else stop_reasons.get(next_action, "no_runnable_action"),
     }
+
+
+def base_loop_argv(audit: dict[str, Any], command: str) -> list[str]:
+    argv = [command]
+    if audit.get("session_id"):
+        argv.extend(["--session-id", str(audit["session_id"])])
+    if audit.get("goal_slug"):
+        argv.extend(["--goal-slug", str(audit["goal_slug"])])
+    return argv
+
+
+def loop_next_action_payload(
+    audit: dict[str, Any],
+    next_action: str,
+    next_plan_item_id: str,
+    packet_id: str,
+    review_mode: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    goal_dir_text = str(audit.get("goal_dir", ""))
+    goal_dir = Path(goal_dir_text) if goal_dir_text else None
+    next_argv: list[str] = []
+    actions: list[dict[str, Any]] = []
+    if next_action in {"start_next_stage", "repair_stage"} and next_plan_item_id:
+        next_argv = [*base_loop_argv(audit, "loop-start-stage"), "--plan-item-id", next_plan_item_id]
+        actions.append({"type": "cli", "name": "start_stage", "argv": next_argv})
+    elif next_action in {"record_missing_evidence", "run_missing_command_evidence", "refresh_final_evidence"}:
+        missing_ids = [str(item) for item in audit.get("missing_acceptance_ids", []) or []]
+        actions.append(
+            {
+                "type": "cli_template",
+                "name": "refresh_final_evidence" if next_action == "refresh_final_evidence" else "record_evidence",
+                "argv_prefix": base_loop_argv(audit, "evidence-add"),
+                "missing_acceptance_ids": missing_ids,
+                "supported_evidence_types": sorted(EVIDENCE_TYPES),
+                "after_success": [*base_loop_argv(audit, "packet-create"), "--review-mode", "exit_review"]
+                if next_action == "refresh_final_evidence"
+                else [],
+            }
+        )
+    elif next_action in {"create_delta_packet", "create_new_packet"} and (review_mode == "delta_review" or next_plan_item_id):
+        acceptance_ids = required_acceptance_ids_for_plan_item(goal_dir, next_plan_item_id) if goal_dir is not None else []
+        next_argv = [*base_loop_argv(audit, "packet-create"), "--review-mode", "delta_review"]
+        for acceptance_id in acceptance_ids:
+            next_argv.extend(["--acceptance-id", acceptance_id])
+        actions.append({"type": "cli", "name": "create_delta_packet", "argv": next_argv, "acceptance_ids": acceptance_ids})
+    elif next_action in {"create_exit_packet", "create_new_packet"} and review_mode == "exit_review":
+        next_argv = [*base_loop_argv(audit, "packet-create"), "--review-mode", "exit_review"]
+        actions.append({"type": "cli", "name": "create_exit_packet", "argv": next_argv})
+    elif next_action in {"record_delta_review", "record_exit_review", "retry_review"} and packet_id:
+        mode = review_mode or ("delta_review" if next_action == "record_delta_review" else "exit_review")
+        next_argv = [*base_loop_argv(audit, "packet-read"), "--review-mode", mode, "--packet-id", packet_id]
+        actions.append({"type": "cli", "name": "read_packet", "argv": next_argv, "packet_id": packet_id, "review_mode": mode})
+        actions.extend(
+            [
+                {
+                    "type": "mcp",
+                    "name": "build_subagent_prompt",
+                    "tool": "mobius_cv_build_subagent_prompt",
+                    "review_mode": mode,
+                    "packet_source": "previous_action.packet",
+                },
+                {
+                    "type": "host_subagent",
+                    "name": "run_stateless_review",
+                    "input": "previous_action.prompt",
+                    "lifecycle": ["spawn", "wait"],
+                },
+                {
+                    "type": "mcp",
+                    "name": "record_review",
+                    "tool": "mobius_cv_record_delta_review" if mode == "delta_review" else "mobius_cv_record_exit_review",
+                    "packet_id": packet_id,
+                    "review_mode": mode,
+                    "target_plan_item_id": next_plan_item_id if mode == "delta_review" else "",
+                },
+                {
+                    "type": "host_subagent",
+                    "name": "close_reviewer",
+                    "when": ["recorded", "failed", "blocked", "timeout", "persistence_error"],
+                    "after": "record_review",
+                },
+            ]
+        )
+    return next_argv, actions
 
 
 def stage_contract_for_plan_item(goal_dir: Path, plan_item_id: str) -> dict[str, Any]:
@@ -3719,7 +4128,7 @@ def validate_delta_targets(goal_dir: Path, target_plan_item_id: str, target_acce
             raise MobiusError(f"target_acceptance_id {acceptance_id} does not belong to plan item {target_plan_item_id}")
 
 
-def acceptance_rows_from_exit_review(goal_dir: Path, cv_result: dict[str, Any]) -> tuple[list[str], list[dict[str, str]]]:
+def acceptance_rows_from_exit_review(goal_dir: Path, cv_result: dict[str, Any], blocker_kind: str = "") -> tuple[list[str], list[dict[str, str]]]:
     result = cv_result.get("result", {}) if isinstance(cv_result.get("result"), dict) else {}
     comparison = cv_result.get("comparison", {}) if isinstance(cv_result.get("comparison"), dict) else {}
     if (
@@ -3730,6 +4139,8 @@ def acceptance_rows_from_exit_review(goal_dir: Path, cv_result: dict[str, Any]) 
         return [], read_csv_rows(goal_dir / "acceptance.csv")
     overall = result.get("overall")
     if overall not in {"pass", "blocked"} or result.get("unchecked_acceptance_ids"):
+        return [], read_csv_rows(goal_dir / "acceptance.csv")
+    if overall == "blocked" and blocker_kind != "terminal_blocked":
         return [], read_csv_rows(goal_dir / "acceptance.csv")
     checked = {str(item) for item in result.get("checked_acceptance_ids", [])}
     support = supporting_evidence_by_acceptance(goal_dir)
@@ -4088,11 +4499,12 @@ def record_cv_result(
         require_checked_ids=True,
     )
     cv_rows = [*read_csv_rows(goal_dir / "cv.csv"), cv_row]
-    updated_acceptance, acceptance_rows = acceptance_rows_from_exit_review(goal_dir, cv_result)
+    comparison = cv_result.get("comparison", {}) if isinstance(cv_result.get("comparison"), dict) else {}
+    blocker_kind = exit_blocker_kind(result, comparison) if result.get("overall") == "blocked" else ""
+    updated_acceptance, acceptance_rows = acceptance_rows_from_exit_review(goal_dir, cv_result, blocker_kind)
     updated_files.append("acceptance.csv")
     repair_plan_item_id = ""
     loop_rows: list[dict[str, str]] | None = None
-    comparison = cv_result.get("comparison", {}) if isinstance(cv_result.get("comparison"), dict) else {}
     retry_exit_review = bool(comparison.get("degraded_reviewers") or result.get("unchecked_acceptance_ids"))
     if result.get("overall") == "fail" and not retry_exit_review:
         affected_acceptance_ids = [str(item) for item in result.get("checked_acceptance_ids", []) or []]
@@ -4132,10 +4544,12 @@ def record_cv_result(
                 blocking_findings=[str(item) for item in blocking],
             )
             updated_files.append("loop.csv")
+    if result.get("overall") == "blocked" and blocker_kind != "terminal_blocked":
+        blocking = [f"exit_review {blocker_kind}: {item}" for item in blocking] or [f"exit_review {blocker_kind}"]
     verdict = derive_verdict(goal_dir, acceptance_rows=acceptance_rows, cv_rows=cv_rows)
     updated_files.append("verdict.csv")
     terminal_writes, terminal_updated_files = ([], [])
-    if result.get("overall") != "fail":
+    if result.get("overall") != "fail" and not (result.get("overall") == "blocked" and blocker_kind != "terminal_blocked"):
         terminal_writes, terminal_updated_files = terminal_status_writes(root, session_id, goal_slug, verdict["overall"])
     writes: list[CsvWrite] = [
         (goal_dir / "cv.csv", CV_FIELDS, cv_rows),
@@ -4168,6 +4582,7 @@ def record_cv_result(
         "blocking_findings": [str(item) for item in blocking],
         "errors": [],
         "updated_acceptance_ids": updated_acceptance,
+        "blocked_kind": blocker_kind,
         "verdict": verdict,
         "loop": post_loop,
     }
@@ -4259,7 +4674,10 @@ def cmd_packet_read(args: argparse.Namespace) -> int:
     expected_ids = packet_required_acceptance_ids(packet) if args.review_mode == "delta_review" else active_required_acceptance_ids(goal_dir)
     _packet, packet_errors = validate_packet_for_goal(goal_dir, packet, args.review_mode, expected_ids)
     if packet_errors:
-        json_print(command_result("packet-read", ok=False, goal_dir=goal_dir, errors=packet_errors, next_required_action="fix_packet_scope"))
+        next_action = "refresh_final_evidence" if args.review_mode == "exit_review" and any(
+            REPAIRABLE_EXIT_BLOCKER_PATTERN.search(error) for error in packet_errors
+        ) else "fix_packet_scope"
+        json_print(command_result("packet-read", ok=False, goal_dir=goal_dir, errors=packet_errors, next_required_action=next_action))
         return 2
     reviewed = packet_has_recorded_review(goal_dir, packet_id)
     target_plan_item_id = str(packet.get("scope", "")) if args.review_mode == "delta_review" else ""
@@ -4398,6 +4816,88 @@ def cmd_status(args: argparse.Namespace) -> int:
             "status",
             next_required_action=next_action,
             data={"mobius_dir": str(mobius_dir), "active_goals": active_goals, "terminal_goals": terminal_goals, "goals": goals},
+        )
+    )
+    return 0
+
+
+def latest_cv_summary(goal_dir: Path) -> dict[str, Any]:
+    rows = read_csv_rows(goal_dir / "cv.csv")
+    if not rows:
+        return {}
+    row = rows[-1]
+    result, comparison, reviewers, input_refs, _errors = canonical_cv_parts(row)
+    return {
+        "cv_id": row.get("cv_id", ""),
+        "packet_id": row.get("packet_id", ""),
+        "review_mode": row.get("review_mode", ""),
+        "overall": result.get("overall", ""),
+        "checked_acceptance_ids": result.get("checked_acceptance_ids", []),
+        "unchecked_acceptance_ids": result.get("unchecked_acceptance_ids", []),
+        "degraded_reviewers": comparison.get("degraded_reviewers", []),
+        "reviewer_verdicts": comparison.get("reviewer_verdicts", {}),
+        "review_policy": input_refs.get("review_policy", {}) if isinstance(input_refs, dict) else {},
+        "reviewer_count": len(reviewers) if isinstance(reviewers, list) else 0,
+        "returned_at": row.get("returned_at", ""),
+    }
+
+
+def packet_summary(goal_dir: Path, packet_id: str) -> dict[str, Any]:
+    if not packet_id:
+        return {}
+    packet = packet_envelope_from_ledger(goal_dir, packet_id)
+    if packet is None:
+        return {"packet_id": packet_id, "present": False}
+    return {
+        "packet_id": packet_id,
+        "present": True,
+        "mode": packet.get("mode", ""),
+        "scope": packet.get("scope", ""),
+        "coverage_ids": sorted(str(item) for item in (packet.get("coverage") or {})),
+        "reviewed": packet_has_recorded_review(goal_dir, packet_id),
+    }
+
+
+def cmd_explain(args: argparse.Namespace) -> int:
+    root = project_root(args)
+    goal_dir = load_goal_dir(root, args.session_id, args.goal_slug)
+    errors = validate_contract_dir(goal_dir)
+    if errors:
+        json_print(command_contract_error("explain", goal_dir, errors))
+        return 2
+    audit = ledger_audit_data(root, args.session_id, args.goal_slug)
+    loop = audit["loop"]
+    packet_id = str(loop.get("packet_id") or audit.get("packet_id") or "")
+    attempts = visible_review_attempts(goal_dir)
+    summary = {
+        "session_id": args.session_id,
+        "goal_slug": args.goal_slug,
+        "goal_id": (read_single_csv(goal_dir / "goal.csv") or {}).get("goal_id", ""),
+        "terminal_verdict": audit.get("terminal_verdict", ""),
+        "loop_gate": audit.get("loop_gate", ""),
+        "next_required_action": loop.get("next_required_action", ""),
+        "next_plan_item_id": loop.get("next_plan_item_id", ""),
+        "next_argv": loop.get("next_argv", []),
+        "next_actions": loop.get("next_actions", []),
+        "pending_reason": loop.get("next_required_action", ""),
+        "outstanding_packet": packet_summary(goal_dir, packet_id),
+        "review_attempts": {
+            "open": attempts["open_review_attempts"],
+            "interrupted": attempts["interrupted_review_attempts"],
+            "failed": attempts["failed_review_attempts"],
+        },
+        "last_cv": latest_cv_summary(goal_dir),
+        "unverified_acceptance_ids": audit.get("unverified_acceptance_ids", []),
+        "repair_findings": loop.get("repair_findings", []),
+        "generated_runtime_artifacts": generated_python_artifacts(root),
+    }
+    json_print(
+        command_result(
+            "explain",
+            goal_dir=goal_dir,
+            gate=audit["terminal_verdict"] or audit["loop_gate"],
+            next_required_action=str(loop.get("next_required_action", "")),
+            data=summary,
         )
     )
     return 0
@@ -4946,7 +5446,8 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--goal-slug", required=True)
     evidence.add_argument("--type", choices=sorted(EVIDENCE_TYPES), required=True)
     evidence.add_argument("--summary", required=True)
-    evidence.add_argument("--supports", action="append", required=True)
+    evidence.add_argument("--supports", action="append")
+    evidence.add_argument("--supports-json", help="JSON string or array of acceptance ids")
     evidence.add_argument("--artifact")
     evidence.add_argument("--artifact-json")
     evidence.add_argument("--created-by", default="main_agent")
@@ -5006,6 +5507,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status")
     status.set_defaults(func=cmd_status)
+
+    explain = sub.add_parser("explain")
+    explain.add_argument("--session-id", required=True)
+    explain.add_argument("--goal-slug", required=True)
+    explain.set_defaults(func=cmd_explain)
 
     hook_health = sub.add_parser("hook-health")
     hook_health.set_defaults(func=cmd_hook_health)

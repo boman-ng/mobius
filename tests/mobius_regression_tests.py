@@ -257,6 +257,32 @@ def human_assertion_stage_args(root: Path, session_id: str, slug: str) -> list[s
     return command
 
 
+def file_ref_stage_args(root: Path, session_id: str, slug: str) -> list[str]:
+    command = stage_contract_args(root, session_id, slug)
+    command[command.index("--gate-json") + 1] = compact_json(
+        {
+            "entry": ["contract locked"],
+            "exit": ["file_ref evidence points to a visible file"],
+            "verifiers": ["file_ref", "mobiuscv_delta"],
+            "review_focus": ["file_ref evidence remains visible from reviewer workspace"],
+        }
+    )
+    command[command.index("--acceptance-json") + 1] = compact_json(
+        [
+            {
+                "id": "A1",
+                "requirement": "File reference evidence is visible",
+                "observable_outcome": "evidence.csv contains file_ref proof row for an existing project-root-relative file",
+                "evidence_required": [{"type": "file_ref", "name": "visible file"}],
+                "verifier": [{"type": "file_ref"}, {"type": "mobiuscv_delta"}],
+                "review_focus": ["file_ref path is reviewer-visible"],
+                "required": True,
+            }
+        ]
+    )
+    return command
+
+
 def read_goal_id(goal: Path) -> str:
     rows = list(csv.DictReader((goal / "goal.csv").open(encoding="utf-8")))
     return rows[0]["goal_id"]
@@ -950,6 +976,7 @@ def test_continue_respects_dependencies() -> None:
         assert second["next_plan_item_id"] == "P2"
         assert second["loop"]["agent_must_continue"] is True
         assert second["loop"]["next_command"] == "loop-start-stage --plan-item-id P2"
+        assert second["loop"]["next_argv"] == ["loop-start-stage", "--session-id", "s", "--goal-slug", slug, "--plan-item-id", "P2"]
 
 
 def test_packet_read_recovers_existing_packet_without_csv_transport() -> None:
@@ -1019,6 +1046,81 @@ def test_packet_read_recovers_existing_packet_without_csv_transport() -> None:
         assert reviewed["review_allowed"] is False
 
 
+def test_mcp_record_review_accepts_packet_id_and_packet_read_result() -> None:
+    module = load_mobius_cv_mcp_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "mcp-packet-id")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        recorded = module.mobius_cv_record_delta_review(
+            project_root=str(root),
+            session_id="s",
+            goal_slug=slug,
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+            packet_id=str(packet["packet"]),
+            codex_subagent_result=reviewer_result("codex-subagent", "delta_review", ["A1"]),
+            cv_id="cv_delta_by_id",
+        )
+        assert recorded["ok"] is True
+        assert recorded["persisted"] is True
+        assert recorded["packet_id"] == packet["packet"]
+        assert mobius.packet_has_recorded_review(goal, str(packet["packet"])) is True
+
+        slug, _goal, _evidence = prepare_goal(root, "s", "mcp-packet-read")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        packet_read = json.loads(
+            run(
+                [
+                    "--project-root",
+                    str(root),
+                    "packet-read",
+                    "--session-id",
+                    "s",
+                    "--goal-slug",
+                    slug,
+                    "--review-mode",
+                    "delta_review",
+                    "--packet-id",
+                    str(packet["packet"]),
+                ]
+            ).stdout
+        )
+        recorded = module.mobius_cv_record_delta_review(
+            project_root=str(root),
+            session_id="s",
+            goal_slug=slug,
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+            packet=packet_read,
+            codex_subagent_result=reviewer_result("codex-subagent", "delta_review", ["A1"]),
+            cv_id="cv_delta_by_packet_read",
+        )
+        assert recorded["ok"] is True
+        assert recorded["persisted"] is True
+        assert recorded["packet_id"] == packet["packet"]
+
+        slug, goal, _evidence = prepare_goal(root, "s", "mcp-mutated-packet")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        packet["brief"]["objective"] = "mutated outside packets.csv"
+        recorded = module.mobius_cv_record_delta_review(
+            project_root=str(root),
+            session_id="s",
+            goal_slug=slug,
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+            packet=packet,
+            codex_subagent_result=reviewer_result("codex-subagent", "delta_review", ["A1"]),
+            cv_id="cv_delta_mutated",
+        )
+        assert recorded["ok"] is False
+        assert "packet envelope does not match packets.csv" in recorded["errors"][0]
+        assert mobius.packet_has_recorded_review(goal, str(packet["packet"])) is False
+
+
 def test_loop_lifecycle_commands_return_mirrored_loop_actions() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1044,6 +1146,8 @@ def test_loop_lifecycle_commands_return_mirrored_loop_actions() -> None:
         )
         loop = assert_required_loop_action_is_mirrored(started)
         assert loop["next_required_action"] == "run_missing_command_evidence"
+        assert loop["next_actions"][0]["name"] == "record_evidence"
+        assert loop["next_actions"][0]["argv_prefix"] == ["evidence-add", "--session-id", "s", "--goal-slug", slug]
 
         evidence = json.loads(
             run(
@@ -1068,6 +1172,17 @@ def test_loop_lifecycle_commands_return_mirrored_loop_actions() -> None:
         )
         loop = assert_required_loop_action_is_mirrored(evidence)
         assert loop["next_required_action"] == "create_delta_packet"
+        assert loop["next_argv"] == [
+            "packet-create",
+            "--session-id",
+            "s",
+            "--goal-slug",
+            slug,
+            "--review-mode",
+            "delta_review",
+            "--acceptance-id",
+            "A1",
+        ]
 
         packet = json.loads(
             run(
@@ -1090,6 +1205,26 @@ def test_loop_lifecycle_commands_return_mirrored_loop_actions() -> None:
         assert loop["next_required_action"] == "record_delta_review"
         assert loop["packet_id"] == packet["packet"]["packet"]
         assert loop["review_mode"] == "delta_review"
+        assert loop["next_argv"] == [
+            "packet-read",
+            "--session-id",
+            "s",
+            "--goal-slug",
+            slug,
+            "--review-mode",
+            "delta_review",
+            "--packet-id",
+            str(packet["packet"]["packet"]),
+        ]
+        assert [action["name"] for action in loop["next_actions"]] == [
+            "read_packet",
+            "build_subagent_prompt",
+            "run_stateless_review",
+            "record_review",
+            "close_reviewer",
+        ]
+        assert loop["next_actions"][2]["lifecycle"] == ["spawn", "wait"]
+        assert "persistence_error" in loop["next_actions"][4]["when"]
 
         read = json.loads(
             run(
@@ -1201,6 +1336,216 @@ def test_evidence_requires_known_acceptance_and_structured_required_proof() -> N
             ).stdout
         )
         assert structured["ok"] is True
+        supports_json_string = json.loads(
+            run(
+                [
+                    "--project-root",
+                    str(root),
+                    "evidence-add",
+                    "--session-id",
+                    "s",
+                    "--goal-slug",
+                    slug,
+                    "--type",
+                    "command_result",
+                    "--summary",
+                    "test evidence via supports json string",
+                    "--supports-json",
+                    json.dumps("A1"),
+                    "--artifact-json",
+                    compact_json({"type": "command_result", "name": "test evidence", "command": "pytest", "exit_code": 0}),
+                ]
+            ).stdout
+        )
+        assert supports_json_string["row"]["supports_json"] == "[\"A1\"]"
+        supports_json_list = json.loads(
+            run(
+                [
+                    "--project-root",
+                    str(root),
+                    "evidence-add",
+                    "--session-id",
+                    "s",
+                    "--goal-slug",
+                    slug,
+                    "--type",
+                    "command_result",
+                    "--summary",
+                    "test evidence via supports json list",
+                    "--supports-json",
+                    json.dumps(["A1"]),
+                    "--artifact-json",
+                    compact_json({"type": "command_result", "name": "test evidence", "command": "pytest", "exit_code": 0}),
+                ]
+            ).stdout
+        )
+        assert supports_json_list["row"]["supports_json"] == "[\"A1\"]"
+        malformed_supports = run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "command_result",
+                "--summary",
+                "bad supports json",
+                "--supports-json",
+                json.dumps({"id": "A1"}),
+                "--artifact-json",
+                compact_json({"type": "command_result", "name": "test evidence", "command": "pytest", "exit_code": 0}),
+            ],
+            check=False,
+        )
+        assert malformed_supports.returncode == 2
+        assert "--supports-json must be a JSON string or array of strings" in json.loads(malformed_supports.stdout)["errors"][0]
+
+
+def test_evidence_validity_scope_distinguishes_stage_final_and_historical() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        run(["--project-root", str(root), "init", "--session-id", "s"])
+        run(
+            [
+                "--project-root",
+                str(root),
+                "goal-start",
+                "--session-id",
+                "s",
+                "--slug",
+                "scoped-evidence",
+                "--title",
+                "scoped-evidence",
+                "--user-goal",
+                "scoped-evidence",
+            ]
+        )
+        slug, _goal = goal_dir(root, "s", "scoped-evidence")
+        command = stage_contract_args(root, "s", slug)
+        command[command.index("--acceptance-json") + 1] = compact_json(
+            [
+                {
+                    "id": "A1",
+                    "requirement": "Final command proof is recorded",
+                    "observable_outcome": "evidence.csv contains final command_result proof row with exit code 0",
+                    "evidence_required": [{"type": "command_result", "name": "scoped proof", "exit_code": 0, "validity_scope": "final"}],
+                    "verifier": [{"type": "command_result", "name": "scoped proof"}, {"type": "mobiuscv_delta"}],
+                    "review_focus": ["evidence validity scope is final"],
+                    "required": True,
+                }
+            ]
+        )
+        run(command)
+        run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
+
+        stage_scoped = run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "command_result",
+                "--summary",
+                "stage scoped proof",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json({"type": "command_result", "name": "scoped proof", "command": "pytest", "exit_code": 0, "validity_scope": "stage"}),
+            ],
+            check=False,
+        )
+        assert stage_scoped.returncode == 2
+        assert "does not satisfy any required proof" in json.loads(stage_scoped.stdout)["errors"][0]
+
+        historical_scoped = run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "command_result",
+                "--summary",
+                "historical scoped proof",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json({"type": "command_result", "name": "scoped proof", "command": "pytest", "exit_code": 0, "validity_scope": "historical"}),
+            ],
+            check=False,
+        )
+        assert historical_scoped.returncode == 2
+        assert "does not satisfy any required proof" in json.loads(historical_scoped.stdout)["errors"][0]
+
+        invalid_scope = run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "command_result",
+                "--summary",
+                "bad scoped proof",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json({"type": "command_result", "name": "scoped proof", "command": "pytest", "exit_code": 0, "validity_scope": "latest"}),
+            ],
+            check=False,
+        )
+        assert invalid_scope.returncode == 2
+        assert "artifact-json.validity_scope" in json.loads(invalid_scope.stdout)["errors"][0]
+
+        final_scoped = json.loads(
+            run(
+                [
+                    "--project-root",
+                    str(root),
+                    "evidence-add",
+                    "--session-id",
+                    "s",
+                    "--goal-slug",
+                    slug,
+                    "--type",
+                    "command_result",
+                    "--summary",
+                    "final scoped proof",
+                    "--supports",
+                    "A1",
+                    "--artifact-json",
+                    compact_json(
+                        {
+                            "type": "command_result",
+                            "name": "scoped proof",
+                            "command": "pytest",
+                            "argv": ["pytest"],
+                            "cwd": ".",
+                            "exit_code": 0,
+                            "duration_seconds": 1.0,
+                            "output_ref": "logs/scoped-proof.txt",
+                            "validity_scope": "final",
+                        }
+                    ),
+                ]
+            ).stdout
+        )
+        assert final_scoped["ok"] is True
+        packet = create_packet(root, "s", slug, "exit_review")
+        assert packet["coverage"] == {"A1": [final_scoped["evidence_id"]]}
 
 
 def test_packet_is_lightweight_index_and_hash_checked() -> None:
@@ -1363,6 +1708,29 @@ def test_evidence_path_boundaries_are_enforced() -> None:
         assert wrong_type.returncode == 2
         assert "--artifact path refs are only allowed" in json.loads(wrong_type.stdout)["errors"][0]
 
+        directory_ref = run(
+            [
+                "--project-root",
+                str(project),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "file_ref",
+                "--summary",
+                "directory file_ref",
+                "--supports",
+                "A1",
+                "--artifact",
+                ".",
+            ],
+            check=False,
+        )
+        assert directory_ref.returncode == 2
+        assert "artifact is not a file" in json.loads(directory_ref.stdout)["errors"][0]
+
         change_set_path = run(
             [
                 "--project-root",
@@ -1385,6 +1753,31 @@ def test_evidence_path_boundaries_are_enforced() -> None:
         )
         assert change_set_path.returncode == 2
         assert "path refs are only allowed" in json.loads(change_set_path.stdout)["errors"][0]
+
+        missing_coverage_object = run(
+            [
+                "--project-root",
+                str(project),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "change_set_scope",
+                "--summary",
+                "missing coverage object",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json({"type": "change_set_scope", "paths": ["src"], "allowed_change_classes": ["source"], "forbidden_paths": [".mobius/**"]}),
+            ],
+            check=False,
+        )
+        assert missing_coverage_object.returncode == 2
+        error = json.loads(missing_coverage_object.stdout)["errors"][0]
+        assert "artifact-json.coverage object" in error
+        assert "intent_to_add" in error
 
         absolute_scope_path = run(
             [
@@ -1595,6 +1988,73 @@ def test_status_lists_active_goals_and_loop_next_is_not_public() -> None:
         assert "invalid choice" in removed.stderr
 
 
+def test_explain_summarizes_goal_loop_packet_cv_and_attempts() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "explain")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        attempt_id = mobius.review_attempt_started(goal, str(packet["packet"]), "delta_review")
+        mobius.review_attempt_finished(goal, attempt_id, "failed", "timeout")
+        explain = json.loads(run(["--project-root", str(root), "explain", "--session-id", "s", "--goal-slug", slug]).stdout)
+        assert explain["next_required_action"] == "retry_review"
+        assert explain["pending_reason"] == "retry_review"
+        assert explain["outstanding_packet"]["packet_id"] == packet["packet"]
+        assert explain["outstanding_packet"]["reviewed"] is False
+        assert explain["review_attempts"]["failed"][0]["packet_id"] == packet["packet"]
+        assert explain["review_attempts"]["failed"][0]["retryable"] == "true"
+        assert explain["review_attempts"]["failed"][0]["retry_count"] == "0"
+        assert explain["last_cv"] == {}
+        assert explain["next_argv"] == [
+            "packet-read",
+            "--session-id",
+            "s",
+            "--goal-slug",
+            slug,
+            "--review-mode",
+            "delta_review",
+            "--packet-id",
+            str(packet["packet"]),
+        ]
+
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
+        after_cv = json.loads(run(["--project-root", str(root), "explain", "--session-id", "s", "--goal-slug", slug]).stdout)
+        assert after_cv["last_cv"]["cv_id"] == "cv_delta_001"
+        assert after_cv["last_cv"]["overall"] == "pass"
+        assert after_cv["last_cv"]["review_mode"] == "delta_review"
+
+
+def test_nonretryable_review_attempt_stops_for_infra_repair() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "nonretryable-attempt")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        attempt_id = mobius.review_attempt_started(goal, str(packet["packet"]), "delta_review")
+        mobius.review_attempt_finished(
+            goal,
+            attempt_id,
+            "failed",
+            "auth unavailable",
+            failure_kind="auth_unavailable",
+            retryable=False,
+            diagnostic_ref="kimi auth unavailable",
+        )
+        explain = json.loads(run(["--project-root", str(root), "explain", "--session-id", "s", "--goal-slug", slug]).stdout)
+        assert explain["next_required_action"] == "fix_reviewer_infra"
+        assert explain["next_argv"] == []
+        assert explain["review_attempts"]["failed"][0]["failure_kind"] == "auth_unavailable"
+        assert explain["review_attempts"]["failed"][0]["retryable"] == "false"
+
+
 def test_delta_light_policy_and_mcp_default_skip_kimi() -> None:
     module = load_mobius_cv_mcp_module()
     with tempfile.TemporaryDirectory() as tmp:
@@ -1630,7 +2090,7 @@ def test_delta_light_policy_and_mcp_default_skip_kimi() -> None:
         assert attempts[0]["status"] == "recorded"
 
 
-def test_raw_reviewer_result_is_ref_not_inline_blob() -> None:
+def test_raw_review_retention_compacts_pass_and_keeps_non_pass_artifacts() -> None:
     module = load_mobius_cv_mcp_module()
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1651,9 +2111,37 @@ def test_raw_reviewer_result_is_ref_not_inline_blob() -> None:
         assert recorded["gate"] == "awaiting_exit_review"
         assert recorded["next_required_action"] == "create_exit_packet"
         cv_row = list(csv.DictReader((goal / "cv.csv").open(encoding="utf-8")))[0]
-        assert cv_row["raw_ref"].endswith("raw_reviews/cv_delta_raw.json")
+        assert cv_row["raw_ref"] == ""
         assert len(cv_row["raw_hash_tail"]) == 7
         assert "MOBIUS_CV_REVIEWER_RESULT" not in json.dumps(cv_row)
+        assert "_raw_text" not in cv_row["reviewers_json"]
+        assert not (goal / "raw_reviews" / "cv_delta_raw.json").exists()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "raw-fail-ref")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        fail_block = (
+            valid_reviewer_block(reviewer="codex-subagent", mode="delta_review")
+            .replace("VERDICT: pass", "VERDICT: fail")
+            .replace('REQUIRED_REVISIONS: []', 'REQUIRED_REVISIONS: ["fix the proof"]')
+        )
+        recorded = module.mobius_cv_record_delta_review(
+            project_root=str(root),
+            session_id="s",
+            goal_slug=slug,
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+            packet=packet,
+            codex_subagent_result=fail_block,
+            cv_id="cv_delta_fail_raw",
+        )
+        assert_loop_action_is_mirrored(recorded)
+        assert recorded["next_required_action"] == "repair_stage"
+        cv_row = list(csv.DictReader((goal / "cv.csv").open(encoding="utf-8")))[0]
+        assert cv_row["raw_ref"].endswith("raw_reviews/cv_delta_fail_raw.json")
+        assert len(cv_row["raw_hash_tail"]) == 7
         assert "_raw_text" not in cv_row["reviewers_json"]
         raw_path = root / cv_row["raw_ref"]
         assert raw_path.exists()
@@ -1983,7 +2471,20 @@ def test_recorded_exit_failure_does_not_half_write_state() -> None:
         assert list(csv.DictReader((goal / "verdict.csv").open(encoding="utf-8"))) == before_verdict
 
 
-def test_recorded_exit_failure_repairs_earliest_stage_and_blocked_is_terminal() -> None:
+def blocked_exit_cv(
+    cv_id: str,
+    goal_id: str,
+    packet_id: str,
+    finding: str,
+) -> dict[str, object]:
+    reviewers = [
+        {**reviewer_result("codex-subagent", "exit_review", ["A1"], "blocked"), "blocking_findings": [finding]},
+        {**reviewer_result("kimi-code", "exit_review", ["A1"], "blocked"), "blocking_findings": [finding]},
+    ]
+    return exit_cv_from_reviewers(cv_id, goal_id, reviewers, packet_id)
+
+
+def test_recorded_exit_failure_repairs_earliest_stage_and_repairable_blocked_refreshes_evidence() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         slug, goal, _evidence = prepare_goal(root, "s", "exit-repair")
@@ -2031,18 +2532,110 @@ def test_recorded_exit_failure_repairs_earliest_stage_and_blocked_is_terminal() 
         assert after_repair["loop"]["agent_must_continue"] is True
         assert after_repair["loop"]["next_command"] == "packet-create --review-mode exit_review"
 
-        slug, goal, _evidence = prepare_goal(root, "s", "exit-blocked")
+        slug, goal, _evidence = prepare_goal(root, "s", "exit-repairable-blocked")
+        start_stage(root, "s", slug)
+        delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_before_blocked", read_goal_id(goal), packet_id=str(delta_packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
         packet = create_packet(root, "s", slug, "exit_review")
         recorded = mobius.record_cv_result(
             root,
             "s",
             slug,
-            cv_envelope("cv_exit_blocked", read_goal_id(goal), overall="blocked", packet_id=str(packet["packet"])),
+            blocked_exit_cv(
+                "cv_exit_blocked",
+                read_goal_id(goal),
+                str(packet["packet"]),
+                "file_ref E1 is stale: README.md recorded sha256:old but current sha256:new; refresh final evidence",
+            ),
+            "exit_review",
+        )
+        assert_loop_action_is_mirrored(recorded)
+        assert recorded["gate"] == "awaiting_exit_review"
+        assert recorded["blocked_kind"] == "repairable_blocked"
+        assert recorded["next_required_action"] == "refresh_final_evidence"
+        assert recorded["loop"]["agent_must_continue"] is True
+        assert recorded["loop"]["next_command"] == "evidence-add"
+        assert recorded["loop"]["next_actions"][0]["name"] == "refresh_final_evidence"
+        assert recorded["loop"]["next_actions"][0]["after_success"] == [
+            "packet-create",
+            "--session-id",
+            "s",
+            "--goal-slug",
+            slug,
+            "--review-mode",
+            "exit_review",
+        ]
+        assert list(csv.DictReader((goal / "goal.csv").open(encoding="utf-8")))[0]["status"] == "active"
+        assert list(csv.DictReader((goal / "acceptance.csv").open(encoding="utf-8")))[0]["status"] == "unknown"
+        assert list(csv.DictReader((goal / "verdict.csv").open(encoding="utf-8")))[0]["overall"] == "pending"
+
+
+def test_recorded_exit_terminal_blocked_remains_terminal() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "exit-terminal-blocked")
+        packet = create_packet(root, "s", slug, "exit_review")
+        recorded = mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            blocked_exit_cv(
+                "cv_exit_terminal_blocked",
+                read_goal_id(goal),
+                str(packet["packet"]),
+                "terminal_blocked: impossible acceptance criteria",
+            ),
             "exit_review",
         )
         assert_loop_action_is_mirrored(recorded)
         assert recorded["gate"] == "blocked"
+        assert recorded["blocked_kind"] == "terminal_blocked"
+        assert recorded["loop"]["agent_must_stop"] is True
         assert list(csv.DictReader((goal / "goal.csv").open(encoding="utf-8")))[0]["status"] == "blocked"
+
+
+def test_recorded_exit_contract_change_required_routes_to_contract_action() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "exit-contract-change")
+        start_stage(root, "s", slug)
+        delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_contract_change", read_goal_id(goal), packet_id=str(delta_packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
+        packet = create_packet(root, "s", slug, "exit_review")
+        recorded = mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            blocked_exit_cv(
+                "cv_exit_contract_change",
+                read_goal_id(goal),
+                str(packet["packet"]),
+                "contract_change_required: acceptance needs a new contract",
+            ),
+            "exit_review",
+        )
+        assert_loop_action_is_mirrored(recorded)
+        assert recorded["blocked_kind"] == "contract_change_required"
+        assert recorded["next_required_action"] == "needs_contract_change"
+        assert recorded["loop"]["agent_must_stop"] is True
+        assert recorded["loop"]["stop_reason"] == "contract_change_required"
+        assert list(csv.DictReader((goal / "goal.csv").open(encoding="utf-8")))[0]["status"] == "active"
 
 
 def test_recorded_exit_unknown_creates_new_exit_packet_not_evidence_action() -> None:
@@ -2083,47 +2676,73 @@ def test_recorded_exit_unknown_creates_new_exit_packet_not_evidence_action() -> 
 
 
 def test_recorded_exit_fail_with_degraded_or_unchecked_retries_exit_review() -> None:
-    scenarios = {
-        "exit-degraded-fail": [
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "exit-degraded-fail")
+        start_stage(root, "s", slug)
+        delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(delta_packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
+        exit_packet = create_packet(root, "s", slug, "exit_review")
+        reviewers = [
             reviewer_result("codex-subagent", "exit_review", ["A1"], "fail"),
             {**reviewer_result("kimi-code", "exit_review", ["A1"], "fail"), "status": "timeout"},
-        ],
-        "exit-unchecked-fail": [
-            reviewer_result("codex-subagent", "exit_review", [], "fail"),
-            reviewer_result("kimi-code", "exit_review", [], "fail"),
-        ],
-    }
-    for slug_suffix, reviewers in scenarios.items():
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            slug, goal, _evidence = prepare_goal(root, "s", slug_suffix)
-            start_stage(root, "s", slug)
-            delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        ]
+        try:
             mobius.record_cv_result(
-                root,
-                "s",
-                slug,
-                delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(delta_packet["packet"])),
-                "delta_review",
-                target_plan_item_id="P1",
-                target_acceptance_ids=["A1"],
-            )
-            exit_packet = create_packet(root, "s", slug, "exit_review")
-            recorded = mobius.record_cv_result(
                 root,
                 "s",
                 slug,
                 exit_cv_from_reviewers("cv_exit_retry", read_goal_id(goal), reviewers, str(exit_packet["packet"])),
                 "exit_review",
             )
-            assert_loop_action_is_mirrored(recorded)
-            assert recorded["gate"] == "awaiting_exit_review"
-            assert recorded["next_required_action"] == "create_new_packet"
-            assert recorded["loop"]["review_mode"] == "exit_review"
-            assert recorded["loop"]["next_command"] == "packet-create --review-mode exit_review"
-            loop_row = list(csv.DictReader((goal / "loop.csv").open(encoding="utf-8")))[0]
-            assert loop_row["status"] == "passed"
-            assert loop_row["last_cv_id"] == "cv_delta_001"
+        except mobius.MobiusError as exc:
+            assert "reviewer infrastructure failures cannot be recorded in cv.csv" in str(exc)
+        else:
+            raise AssertionError("record_cv_result accepted degraded reviewer infrastructure output")
+        assert mobius.packet_has_recorded_review(goal, str(exit_packet["packet"])) is False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "exit-unchecked-fail")
+        start_stage(root, "s", slug)
+        delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(delta_packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
+        exit_packet = create_packet(root, "s", slug, "exit_review")
+        reviewers = [
+            reviewer_result("codex-subagent", "exit_review", [], "fail"),
+            reviewer_result("kimi-code", "exit_review", [], "fail"),
+        ]
+        recorded = mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            exit_cv_from_reviewers("cv_exit_retry", read_goal_id(goal), reviewers, str(exit_packet["packet"])),
+            "exit_review",
+        )
+        assert_loop_action_is_mirrored(recorded)
+        assert recorded["gate"] == "awaiting_exit_review"
+        assert recorded["next_required_action"] == "create_new_packet"
+        assert recorded["loop"]["review_mode"] == "exit_review"
+        assert recorded["loop"]["next_command"] == "packet-create --review-mode exit_review"
+        loop_row = list(csv.DictReader((goal / "loop.csv").open(encoding="utf-8")))[0]
+        assert loop_row["status"] == "passed"
+        assert loop_row["last_cv_id"] == "cv_delta_001"
 
 
 def test_recorded_exit_fail_budget_exhaustion_persists_blocked_loop() -> None:
@@ -2286,39 +2905,72 @@ def test_kimi_adapter_handles_auth_timeout_and_invalid_output() -> None:
     try:
         module.shutil.which = lambda _name: "/usr/bin/kimi"
         module.discover_kimi = lambda deep=False: {"status": "ready", "supports": {"prompt": True}}
+        with tempfile.TemporaryDirectory() as tmp:
+            context = {"project_root": tmp}
 
-        module.run_kimi_review_command = lambda *args, **kwargs: {
-            "status": "error",
-            "exit_code": 1,
-            "stdout": "",
-            "stderr": "OAuth provider managed:kimi-code failed to fetch an access token from auth.kimi.com",
-            "duration_seconds": 0.1,
-        }
-        auth = module.run_kimi_review("{}", "delta_review", ["A1"], 900)
-        assert auth["status"] == "auth_unavailable"
-        assert auth["retryable"] is False
+            module.run_kimi_review_command = lambda *args, **kwargs: {
+                "status": "error",
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "OAuth provider managed:kimi-code failed to fetch an access token from auth.kimi.com",
+                "duration_seconds": 0.1,
+            }
+            auth = module.run_kimi_review("{}", "delta_review", ["A1"], 900, context)
+            assert auth["status"] == "auth_unavailable"
+            assert auth["retryable"] is False
 
-        module.run_kimi_review_command = lambda *args, **kwargs: {
-            "status": "hard_timeout",
-            "exit_code": None,
-            "stdout": "",
-            "stderr": "",
-            "duration_seconds": 1.0,
-        }
-        timeout = module.run_kimi_review("{}", "delta_review", ["A1"], 900)
-        assert timeout["status"] == "hard_timeout"
-        assert timeout["retryable"] is True
+            module.run_kimi_review_command = lambda *args, **kwargs: {
+                "status": "hard_timeout",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "duration_seconds": 1.0,
+            }
+            timeout = module.run_kimi_review("{}", "delta_review", ["A1"], 900, context)
+            assert timeout["status"] == "hard_timeout"
+            assert timeout["retryable"] is True
 
-        module.run_kimi_review_command = lambda *args, **kwargs: {
-            "status": "ok",
-            "exit_code": 0,
-            "stdout": '{"message":{"content":"not the required block"}}\n',
-            "stderr": "",
-            "duration_seconds": 0.1,
-        }
-        invalid = module.run_kimi_review("{}", "exit_review", ["A1"], 900)
-        assert invalid["status"] == "invalid_output"
-        assert invalid["verdict"] == "unknown"
+            module.run_kimi_review_command = lambda *args, **kwargs: {
+                "status": "ok",
+                "exit_code": 0,
+                "stdout": '{"message":{"content":"not the required block"}}\n',
+                "stderr": "",
+                "duration_seconds": 0.1,
+            }
+            invalid = module.run_kimi_review("{}", "exit_review", ["A1"], 900, context)
+            assert invalid["status"] == "invalid_output"
+            assert invalid["verdict"] == "unknown"
+    finally:
+        module.shutil.which = previous_which
+
+
+def test_kimi_review_uses_project_root_workspace() -> None:
+    module = load_mobius_cv_mcp_module()
+    previous_which = module.shutil.which
+    try:
+        module.shutil.which = lambda _name: "/usr/bin/kimi"
+        module.discover_kimi = lambda deep=False: {"status": "ready", "supports": {"prompt": True}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            captured: dict[str, object] = {}
+
+            def fake_run_kimi_review_command(*args, **kwargs):
+                captured.update(kwargs)
+                block = valid_reviewer_block(mode="delta_review")
+                return {
+                    "status": "ok",
+                    "exit_code": 0,
+                    "stdout": json.dumps({"role": "assistant", "content": block}) + "\n",
+                    "stderr": "",
+                    "duration_seconds": 0.1,
+                }
+
+            module.run_kimi_review_command = fake_run_kimi_review_command
+            result = module.run_kimi_review("{}", "delta_review", ["A1"], 900, {"project_root": str(root)})
+
+            assert result["verdict"] == "pass"
+            assert captured["cwd"] == str(root)
+            assert result["cli"]["cwd"] == str(root)
     finally:
         module.shutil.which = previous_which
 
@@ -2373,11 +3025,290 @@ def test_mcp_missing_subagent_fails_before_reviewers_and_packet_consumption() ->
             raise AssertionError("reviewer should not run when codex_subagent_result is missing")
 
         module.run_kimi_review = fail_if_called
-        recorded = module.review_and_record("delta_review", str(root), "s", slug, packet, 2, None, None, "P1", ["A1"], 900, "cv_delta_001", None)
+        recorded = module.review_and_record("delta_review", str(root), "s", slug, packet, None, 2, None, None, "P1", ["A1"], 900, "cv_delta_001", None)
         assert recorded["ok"] is False
         assert "codex_subagent_result is required" in recorded["errors"][0]
         assert reviewer_called["value"] is False
         assert mobius.packet_has_recorded_review(goal, str(packet["packet"])) is False
+
+
+def test_mcp_reviewer_infra_failure_retries_same_packet_without_cv_row() -> None:
+    module = load_mobius_cv_mcp_module()
+    previous_which = module.shutil.which
+    try:
+        module.shutil.which = lambda _name: "/usr/bin/kimi"
+        module.discover_kimi = lambda deep=False: {"status": "ready", "supports": {"prompt": True}}
+        module.run_kimi_review_command = lambda *args, **kwargs: {
+            "status": "hard_timeout",
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "duration_seconds": 1.0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            slug, goal, _evidence = prepare_goal(root, "s", "mcp-infra-retry")
+            start_stage(root, "s", slug)
+            packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+            recorded = module.mobius_cv_record_delta_review(
+                project_root=str(root),
+                session_id="s",
+                goal_slug=slug,
+                target_plan_item_id="P1",
+                target_acceptance_ids=["A1"],
+                packet_id=str(packet["packet"]),
+                level=2,
+                codex_subagent_result=reviewer_result("codex-subagent", "delta_review", ["A1"]),
+                cv_id="cv_delta_timeout",
+            )
+
+            assert recorded["ok"] is True
+            assert recorded["persisted"] is True
+            assert recorded["infra_failure"] is True
+            assert recorded["next_required_action"] == "retry_review"
+            assert mobius.packet_has_recorded_review(goal, str(packet["packet"])) is False
+            assert list(csv.DictReader((goal / "cv.csv").open(encoding="utf-8"))) == []
+            attempts = list(csv.DictReader((goal / "review_attempts.csv").open(encoding="utf-8")))
+            assert len(attempts) == 1
+            assert attempts[0]["packet_id"] == packet["packet"]
+            assert attempts[0]["status"] == "failed"
+            assert attempts[0]["failure_kind"] == "reviewer_infra_failure"
+            assert attempts[0]["retryable"] == "true"
+            assert attempts[0]["diagnostic_ref"] == "cv_delta_timeout"
+            assert attempts[0]["retry_count"] == "0"
+
+            audit = json.loads(run(["--project-root", str(root), "continue", "--session-id", "s", "--goal-slug", slug]).stdout)
+            assert audit["loop"]["next_required_action"] == "retry_review"
+            assert audit["loop"]["packet_id"] == packet["packet"]
+            assert audit["loop"]["next_command"] == f"packet-read --review-mode delta_review --packet-id {packet['packet']}"
+    finally:
+        module.shutil.which = previous_which
+
+
+def test_exit_review_preflight_blocks_invisible_file_ref_before_attempt() -> None:
+    module = load_mobius_cv_mcp_module()
+    previous_which = module.shutil.which
+    try:
+        module.shutil.which = lambda _name: "/usr/bin/kimi"
+        module.discover_kimi = lambda deep=False: {"status": "ready", "supports": {"prompt": True}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proof = root / "VISIBLE.txt"
+            proof.write_text("review me\n", encoding="utf-8")
+            run(["--project-root", str(root), "init", "--session-id", "s"])
+            run(
+                [
+                    "--project-root",
+                    str(root),
+                    "goal-start",
+                    "--session-id",
+                    "s",
+                    "--slug",
+                    "exit-preflight",
+                    "--title",
+                    "exit-preflight",
+                    "--user-goal",
+                    "exit-preflight",
+                ]
+            )
+            slug, goal = goal_dir(root, "s", "exit-preflight")
+            run(file_ref_stage_args(root, "s", slug))
+            run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
+            run(
+                [
+                    "--project-root",
+                    str(root),
+                    "evidence-add",
+                    "--session-id",
+                    "s",
+                    "--goal-slug",
+                    slug,
+                    "--type",
+                    "file_ref",
+                    "--summary",
+                    "visible file proof",
+                    "--supports",
+                    "A1",
+                    "--artifact",
+                    "VISIBLE.txt",
+                ]
+            )
+            start_stage(root, "s", slug)
+            delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+            mobius.record_cv_result(
+                root,
+                "s",
+                slug,
+                delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(delta_packet["packet"]), policy_name="delta_light"),
+                "delta_review",
+                target_plan_item_id="P1",
+                target_acceptance_ids=["A1"],
+            )
+            exit_packet = create_packet(root, "s", slug, "exit_review")
+            proof.unlink()
+            reviewer_called = {"value": False}
+
+            def fail_if_called(*args, **kwargs):
+                reviewer_called["value"] = True
+                raise AssertionError("Kimi reviewer should not run when exit preflight fails")
+
+            module.run_kimi_review = fail_if_called
+            recorded = module.mobius_cv_record_exit_review(
+                project_root=str(root),
+                session_id="s",
+                goal_slug=slug,
+                packet=exit_packet,
+                codex_subagent_result=reviewer_result("codex-subagent", "exit_review", ["A1"]),
+                cv_id="cv_exit_001",
+            )
+
+            assert recorded["ok"] is False
+            assert recorded["persisted"] is False
+            assert recorded["next_required_action"] == "refresh_final_evidence"
+            assert "file_ref E1 is not current final evidence: VISIBLE.txt is missing" in recorded["errors"][0]
+            assert reviewer_called["value"] is False
+            assert mobius.packet_has_recorded_review(goal, str(exit_packet["packet"])) is False
+            attempts = list(csv.DictReader((goal / "review_attempts.csv").open(encoding="utf-8")))
+            assert attempts == []
+    finally:
+        module.shutil.which = previous_which
+
+
+def test_exit_packet_create_blocks_stale_file_ref_before_review() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        proof = root / "proof.txt"
+        proof.write_text("before\n", encoding="utf-8")
+        run(["--project-root", str(root), "init", "--session-id", "s"])
+        run(["--project-root", str(root), "goal-start", "--session-id", "s", "--slug", "stale-exit-packet", "--title", "stale-exit-packet", "--user-goal", "stale-exit-packet"])
+        slug, _goal = goal_dir(root, "s", "stale-exit-packet")
+        run(file_ref_stage_args(root, "s", slug))
+        run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
+        run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "file_ref",
+                "--summary",
+                "visible file proof",
+                "--supports",
+                "A1",
+                "--artifact",
+                "proof.txt",
+            ]
+        )
+        proof.write_text("after\n", encoding="utf-8")
+        result = run(
+            ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"],
+            check=False,
+        )
+        payload = json.loads(result.stdout)
+        assert result.returncode == 2
+        assert payload["next_required_action"] == "refresh_final_evidence"
+        assert "file_ref E1 is stale" in payload["errors"][0]
+
+
+def test_exit_packet_create_blocks_outdated_final_command_evidence() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "src.py"
+        source.write_text("before\n", encoding="utf-8")
+        slug, _goal, _evidence = prepare_goal(root, "s", "stale-command-evidence")
+        run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "command_result",
+                "--summary",
+                "final test evidence",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json(
+                    {
+                        "type": "command_result",
+                        "name": "test evidence",
+                        "command": "pytest",
+                        "exit_code": 0,
+                        "validity_scope": "final",
+                        "recorded_at": "2000-01-01T00:00:00+00:00",
+                    }
+                ),
+            ]
+        )
+        source.write_text("after\n", encoding="utf-8")
+        result = run(
+            ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"],
+            check=False,
+        )
+        payload = json.loads(result.stdout)
+        assert result.returncode == 2
+        assert payload["next_required_action"] == "refresh_final_evidence"
+        assert "command_result E2 final evidence predates current source changes" in payload["errors"][0]
+
+
+def test_exit_packet_create_blocks_missing_final_scoped_evidence() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        run(["--project-root", str(root), "init", "--session-id", "s"])
+        run(["--project-root", str(root), "goal-start", "--session-id", "s", "--slug", "missing-final-evidence", "--title", "missing-final-evidence", "--user-goal", "missing-final-evidence"])
+        slug, _goal = goal_dir(root, "s", "missing-final-evidence")
+        command = stage_contract_args(root, "s", slug)
+        command[command.index("--acceptance-json") + 1] = compact_json(
+            [
+                {
+                    "id": "A1",
+                    "requirement": "Final release gate passes",
+                    "observable_outcome": "Final-scoped release gate command exits 0",
+                    "evidence_required": [{"type": "command_result", "name": "release gate", "exit_code": 0, "validity_scope": "final"}],
+                    "verifier": [{"type": "command_result", "name": "release gate"}, {"type": "mobiuscv_exit"}],
+                    "review_focus": ["final release gate is current"],
+                    "required": True,
+                }
+            ]
+        )
+        run(command)
+        run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
+        result = run(
+            ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"],
+            check=False,
+        )
+        payload = json.loads(result.stdout)
+        assert result.returncode == 2
+        assert payload["next_required_action"] == "refresh_final_evidence"
+        assert "acceptance A1 is missing final-scoped evidence" in payload["errors"][0]
+
+
+def test_generated_python_artifacts_are_cheap_exit_diagnostics() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        pycache = root / "plugins" / "mobius" / "scripts" / "__pycache__"
+        pycache.mkdir(parents=True)
+        (pycache / "mobius.cpython-312.pyc").write_bytes(b"bytecode")
+        slug, _goal, _evidence = prepare_goal(root, "s", "generated-artifact")
+        result = run(
+            ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"],
+            check=False,
+        )
+        payload = json.loads(result.stdout)
+        assert result.returncode == 2
+        assert payload["next_required_action"] == "refresh_final_evidence"
+        assert "generated runtime artifact in plugin source tree" in payload["errors"][0]
+        explain = json.loads(run(["--project-root", str(root), "explain", "--session-id", "s", "--goal-slug", slug]).stdout)
+        assert "plugins/mobius/scripts/__pycache__" in explain["generated_runtime_artifacts"]
+        assert "plugins/mobius/scripts/__pycache__/mobius.cpython-312.pyc" in explain["generated_runtime_artifacts"]
 
 
 def test_mcp_registry_and_recorded_surface() -> None:
@@ -2610,10 +3541,12 @@ TESTS = [
     test_contract_supersede_stage_blocks_active_dependents,
     test_continue_respects_dependencies,
     test_packet_read_recovers_existing_packet_without_csv_transport,
+    test_mcp_record_review_accepts_packet_id_and_packet_read_result,
     test_loop_lifecycle_commands_return_mirrored_loop_actions,
     test_record_missing_evidence_loop_action_for_non_command_proof,
     test_unlocked_contract_blocks_loop_packet_and_recorded_review,
     test_evidence_requires_known_acceptance_and_structured_required_proof,
+    test_evidence_validity_scope_distinguishes_stage_final_and_historical,
     test_packet_is_lightweight_index_and_hash_checked,
     test_file_ref_and_change_set_scope_evidence_are_compact_refs,
     test_evidence_path_boundaries_are_enforced,
@@ -2622,8 +3555,10 @@ TESTS = [
     test_ledger_audit_reports_missing_exit_cv,
     test_exit_review_interruption_is_visible,
     test_status_lists_active_goals_and_loop_next_is_not_public,
+    test_explain_summarizes_goal_loop_packet_cv_and_attempts,
+    test_nonretryable_review_attempt_stops_for_infra_repair,
     test_delta_light_policy_and_mcp_default_skip_kimi,
-    test_raw_reviewer_result_is_ref_not_inline_blob,
+    test_raw_review_retention_compacts_pass_and_keeps_non_pass_artifacts,
     test_pass_cv_requires_recorded_review_policy,
     test_recorded_review_rejects_aggregate_mismatch_and_degraded_pass,
     test_delta_pass_requires_satisfied_proof_obligations,
@@ -2634,7 +3569,9 @@ TESTS = [
     test_public_loop_stop_reasons_are_closed_set,
     test_recorded_exit_pass_updates_acceptance_verdict_and_run,
     test_recorded_exit_failure_does_not_half_write_state,
-    test_recorded_exit_failure_repairs_earliest_stage_and_blocked_is_terminal,
+    test_recorded_exit_failure_repairs_earliest_stage_and_repairable_blocked_refreshes_evidence,
+    test_recorded_exit_terminal_blocked_remains_terminal,
+    test_recorded_exit_contract_change_required_routes_to_contract_action,
     test_recorded_exit_unknown_creates_new_exit_packet_not_evidence_action,
     test_recorded_exit_fail_with_degraded_or_unchecked_retries_exit_review,
     test_recorded_exit_fail_budget_exhaustion_persists_blocked_loop,
@@ -2643,9 +3580,16 @@ TESTS = [
     test_mobius_cv_prompt_allows_autonomous_review_tools,
     test_mobius_cv_parser_accepts_and_rejects_contract_blocks,
     test_kimi_adapter_handles_auth_timeout_and_invalid_output,
+    test_kimi_review_uses_project_root_workspace,
     test_kimi_stream_extractor_requires_assistant_role,
     test_kimi_startup_health_is_lazy_by_default,
     test_mcp_missing_subagent_fails_before_reviewers_and_packet_consumption,
+    test_mcp_reviewer_infra_failure_retries_same_packet_without_cv_row,
+    test_exit_review_preflight_blocks_invisible_file_ref_before_attempt,
+    test_exit_packet_create_blocks_stale_file_ref_before_review,
+    test_exit_packet_create_blocks_outdated_final_command_evidence,
+    test_exit_packet_create_blocks_missing_final_scoped_evidence,
+    test_generated_python_artifacts_are_cheap_exit_diagnostics,
     test_mcp_registry_and_recorded_surface,
     test_stop_hook_blocks_only_explicit_pending_goal,
     test_pre_tool_hook_blocks_state_writes_and_allows_reads,
