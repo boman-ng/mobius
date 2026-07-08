@@ -38,15 +38,18 @@ Codex discovers that file for enabled plugins. Hook commands launch Mobius throu
   an accepted verdict.csv.
 ```
 
-`hooks/hooks.json` contains only minimal event dispatch plus a `PLUGIN_ROOT`/launcher presence
-check. `scripts/mobius_hook_launcher.sh` is the only full hook launch path. It uses `${PLUGIN_ROOT}`
-and classifies failures:
+`hooks/hooks.json` contains only minimal event dispatch plus the bootstrap checks that must run
+before the launcher is available: empty `${PLUGIN_ROOT}` and a missing installed cache directory.
+`scripts/mobius_hook_launcher.sh` is the only full hook launch path. It is invoked through
+`/bin/sh`, so installed plugin bundles do not depend on executable file mode. Hook startup failures
+are classified as follows:
 
 - empty `${PLUGIN_ROOT}` prints `mobius:hook-misconfigured: PLUGIN_ROOT missing` and exits 2;
 - a missing installed cache directory under `~/.codex/plugins/cache/.../mobius/<version>/` prints
   `mobius:hook-unavailable: installed plugin cache missing` and exits 0;
-- an existing plugin root without `scripts/mobius_hook_launcher.sh` or `scripts/mobius.py` prints
-  `mobius:hook-corrupt-install` and exits 2;
+- an existing plugin root without `scripts/mobius.py` prints `mobius:hook-corrupt-install` and exits
+  2; if the launcher itself is missing, the rendered hook command fails closed before Mobius code can
+  run;
 - missing `python3` prints `mobius:hook-runtime-missing: python3` and exits 2.
 
 Mobius does not ship a post-tool hook. Contract validation after state mutation is owned by the
@@ -66,7 +69,13 @@ targets Mobius explicitly:
 
 Mobius hooks are no-op for ordinary work even if the plugin is enabled, `.mobius/` exists, a prior
 session has a goal, or the final answer contains generic completion words. Reading protected ledger
-files is allowed when the command is a simple read-only inspection.
+files is allowed when the command is a simple read-only inspection. Restricted pipelines are narrow:
+the first segment may be a read command such as `cat`, `head`, `tail`, `wc`, `sha256sum`, `stat`,
+`file`, `grep`, `rg`, or `nl`; later segments may only be stdout filters `sort`, `uniq`, or `wc`
+using option-only stdout forms, without path operands, output flags, or file-reading flags. Redirects,
+shell control operators, and write-capable inspection tools remain blocked. Path globs and brace
+expansions under `.mobius/runs/...` that could expand to protected ledger filenames are treated as
+protected ledger paths.
 
 ## Invariants Enforced
 
@@ -112,9 +121,21 @@ filename=plan.csv
 Relative `.mobius/runs/...` paths resolve against the hook project root. Narrative content that
 mentions `.mobius/` but is not a path field or command token does not activate write protection.
 
-## Health
+## Health And Doctor
 
-Run hook health from source or an installed cache:
+Run install diagnostics from source or an installed cache:
+
+```bash
+python3 <mobius-plugin-root>/scripts/mobius.py doctor
+```
+
+`doctor` reports plugin root, source versus installed-cache location, POSIX platform support,
+`python3`, `uv`/`MOBIUS_CV_UV`, hook files, MCP launcher self-check readiness, and optional
+`PLUGIN_DATA` writability. Hook status is one of `active`, `inactive`, `stale_cache_path`, or
+`unsupported_platform`. Missing `uv` or a failing launcher self-check fails doctor because MobiusCV
+MCP cannot start, but it does not make hook-health fail by itself.
+
+Run hook health when checking only hook registration shape:
 
 ```bash
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root /tmp hook-health

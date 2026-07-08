@@ -139,7 +139,7 @@ rows in the same transaction. Required stage JSON cells:
 - `work_json`: target refs, deliverables, public API changes, and deleted paths.
 - `gate_json`: entry conditions, exit checks, verifier classes, and review focus.
 - `recovery_json`: rollback boundary, restart rule, and escalation rule.
-- `budget_json`: retry limit or max attempts, expected size, and stop condition.
+- `budget_json`: `max_stage_attempts`, expected size, and stop condition.
 - `acceptance_ids_json`: linked proof-obligation ids.
 
 `--contract-defaults local` may fill omitted local-stage cells for `depends_on_json`,
@@ -156,7 +156,7 @@ runtime ledger without storing plan revisions.
 `acceptance.csv` stores `mobius.acceptance` rows:
 
 ```csv
-schema,goal_id,id,plan_item_id,requirement,observable_outcome,evidence_required_json,verifier_json,review_focus_json,required,status,evidence_ids_json,cv_id,verified_by,verified_at,locked,locked_at,locked_by,supersedes_id,change_reason,lock_hash
+schema,goal_id,id,plan_item_id,requirement,observable_outcome,evidence_required_json,verifier_json,review_focus_json,required,status,evidence_ids_json,cv_id,verified_by,verified_at,delta_status,delta_cv_id,delta_verified_at,locked,locked_at,locked_by,supersedes_id,change_reason,lock_hash
 ```
 
 Each required row must define:
@@ -168,6 +168,11 @@ Each required row must define:
 - `verifier_json`: deterministic command/test checks, MobiusCV review gates
   (`mobiuscv_delta` or `mobiuscv_exit`), human gate, or mixed verifier.
 - `review_focus_json`: questions reviewers must answer.
+
+`status`, `cv_id`, and `verified_at` are final acceptance fields and are written only by recorded
+exit review. Delta review writes `delta_status`, `delta_cv_id`, and `delta_verified_at` to show
+stage-level progress without pretending final acceptance is complete. `explain` and `ledger-audit`
+therefore distinguish delta-verified acceptance ids from final-unverified acceptance ids.
 
 Ambiguous pass language must be tied to concrete observable outcomes or validation rejects the
 contract.
@@ -222,13 +227,23 @@ proof metadata:
   `validity_scope`.
 - `file_ref` points to an existing project-root-relative file and stores full local sha256.
 - `change_set_scope` describes paths, allowed change classes, forbidden paths, and required
-  coverage flags: `tracked`, `staged`, `untracked`, and `intent_to_add`.
+  coverage flags: `tracked`, `staged`, `untracked`, and `intent_to_add`. Delta packet preflight
+  compares the current `git status --porcelain=v1 -z` changed paths with `paths` and
+  `forbidden_paths`; uncovered or forbidden changed paths block the packet.
 - `human_assertion` records explicit human assertion text and is not structured proof by itself.
 
-When an acceptance `evidence_required_json` item declares `validity_scope`, matching evidence must
-declare the same value in `artifact_json`. Allowed scopes are `stage`, `final`, and `historical`;
-they distinguish proofs created during one stage from final release checks or historical context.
-Unscoped requirements remain compatible with older evidence rows.
+Evidence validity is explicit. Allowed `artifact_json.validity_scope` values are `stage`, `final`,
+and `historical`; unscoped evidence is treated as `stage`. Delta packets may use stage evidence.
+Exit packets select the newest matching `final` evidence for every required `command_result`,
+`test_result`, `file_ref`, and `change_set_scope` proof. Historical evidence can remain in the
+ledger for context but is not selected for final proof. Final command/test evidence must include
+auditable run metadata: non-empty `argv`, project-root-relative `cwd`, `started_at`, `finished_at`,
+non-negative integer `duration_ms`, `exit_code`, and at least one stdout/stderr/log ref or hash.
+Missing, stale, or outdated final evidence fails closed at `refresh_final_evidence`.
+
+Use `evidence-list --session-id ... --goal-slug ...` to inspect evidence currentness, validity
+scope, and final refresh templates. It is read-only and derives diagnostics from `evidence.csv`,
+the source tree, and the locked acceptance matrix.
 
 Packets only transmit compact refs with short hash tails; full hashes remain local.
 `evidence-add` accepts repeatable `--supports` values or `--supports-json` as either one JSON
@@ -268,11 +283,38 @@ output, copied diffs, or copied file contents.
 
 `packet-read` is the normal read-only path for recovering an already-created packet, especially
 when `continue` reports `record_delta_review`, `record_exit_review`, or `retry_review`. It returns
-the packet envelope and validation metadata, not the CSV packet ledger row. If the packet already
-has a recorded review, callers create a fresh packet instead of reusing the old id.
+the packet envelope, validation metadata, a `review_contract_view`, and a reviewer checklist, not
+the CSV packet ledger row. If the packet already has a recorded review, callers create a fresh
+packet instead of reusing the old id.
 MobiusCV recorded review tools may receive this canonical `packet-read` result or a `packet_id`;
 they load the frozen packet from `packets.csv` before validation. Mutated packet envelopes still
 fail packet hash validation.
+
+### Review Contract View
+
+`review_contract_view` is generated at read/review time from existing Mobius ledgers and the frozen
+packet. It is not a CSV ledger, JSON source of truth, packet schema, verdict engine, or editable
+acceptance source. Mobius must not consume a rendered view as replacement state; if the view and the
+packet/ledgers disagree, packet and ledger validation win and the review must fail closed.
+
+The view exposes only compact review boundaries:
+
+- `review_target`: packet id, packet hash, review mode, goal slug, scope, and target plan item.
+- `relation_to_prior`: audit label only, limited to `new_review_target`,
+  `new_audit_of_current_workspace`, `explicit_reopen`, or `prior_review_process_audit`.
+- `claim_boundary`: derived goal, non-claims, target plan fields, and checked acceptance ids.
+- `evidence_boundary`: packet coverage, packet refs, evidence ids, ledger root, and a marker that no
+  full evidence archive is embedded.
+- `acceptance_matrix`: required acceptance rows with observable outcome, required evidence,
+  verifier, review focus, and falsifiers.
+- `review_policy`: derived from `cv.csv.input_refs_json.review_policy` when recorded, otherwise
+  from locked gate/default policy names `delta_light`, `delta_kimi`, or `exit_strict`.
+- `terminal_rule`: explanatory only; terminal goals still require an explicit reopen or new target.
+- `output_contract`: surface-specific. MobiusCV recorded reviews require
+  `MOBIUS_CV_REVIEWER_RESULT`; CrossReview packets use `CROSS_REVIEW_RESULT_V1`.
+
+The view must not copy file contents, diffs, command output, full sha256 archives, previous review
+chat, or raw reviewer output.
 
 `cv.csv` stores canonical recorded review rows:
 
@@ -306,11 +348,16 @@ started. Preflight failures return `ok=false` / `persisted=false` and leave `cv.
 schema,attempt_id,packet_id,review_mode,status,started_at,finished_at,reviewer_summary_ref,failure_kind,retryable,diagnostic_ref,retry_count
 ```
 
-Allowed statuses are `started`, `recorded`, `interrupted`, and `failed`. A `started` row without
-`finished_at` is treated by `ledger-audit` as an interrupted/open attempt. Retryable `failed` and
-`interrupted` attempts produce a `retry_review` action for the same outstanding packet while
-`packet_has_recorded_review` remains false. Non-retryable `failed` attempts stop at
-`fix_reviewer_infra` with the compact diagnostic fields visible through `explain`.
+Allowed statuses are `started`, `recorded`, `interrupted`, and `failed`. Contract validation checks
+the file header, unique attempt ids, packet/review-mode references, `retry_count` as the zero-based
+sequence number for the same `packet_id` and `review_mode`, status/`finished_at` coherence,
+recorded-attempt CV references, and required failed-attempt diagnostics. A `failed` row must carry
+`failure_kind`, explicit `retryable=true|false`, and a compact `diagnostic_ref`. A
+`started` row without `finished_at` is treated by `ledger-audit` as an interrupted/open attempt.
+Retryable `failed` and `interrupted` attempts produce a `retry_review` action for the same
+outstanding packet while `packet_has_recorded_review` remains false. Non-retryable `failed`
+attempts stop at `fix_reviewer_infra` with the compact diagnostic fields visible through
+`explain`.
 
 `verdict.csv` is derived by Mobius:
 
@@ -341,8 +388,6 @@ Loop status:
 pending -> running
 running -> passed
 running -> blocked
-blocked -> running
-passed -> running
 ```
 
 Acceptance status:
@@ -353,15 +398,20 @@ unknown -> blocked
 unknown|pass|blocked -> superseded
 ```
 
-Only recorded delta review may write loop `passed`. Repairable delta review output keeps the stage
-`running`; blocked or budget-exhausted stages become loop `blocked`. A recorded exit review `fail`
-with checked active acceptance ids routes the earliest affected stage back to `running` for repair.
-Recorded exit review may write acceptance `pass`; it writes terminal `blocked` only for
-`terminal_blocked` findings. Repairable exit blockers such as stale `file_ref` hashes, final
-command/test evidence that predates current source changes, stale packet refs, missing final
-evidence, or generated Python artifacts keep the goal active and route to `refresh_final_evidence`
-or fresh exit packet creation. Findings prefixed with `contract_change_required:` route to
-contract repair without terminal blocked. Exit review `unknown`, degraded output, or unchecked
+Only `loop-start-stage` may move `pending` to `running`, and only recorded delta review may write
+loop `passed` or `blocked`. Passed or blocked stages are not restarted by `loop-start-stage`; use
+`loop-reopen-stage --from-cv-id ... --reason ...` when a later exit review requires explicit
+repair. Repairable delta review output keeps the stage `running`; blocked or budget-exhausted
+stages become loop `blocked`. A recorded exit review `fail` with checked active acceptance ids
+routes the earliest affected stage to `loop_reopen_stage`; after a newer delta CV passes that
+stage, Mobius creates a fresh exit packet. Recorded exit review may write acceptance `pass`; it
+writes terminal `blocked` only for
+`terminal_blocked` findings. Mobius-generated final-state diagnostics such as stale `file_ref`
+hashes, final command/test evidence that predates current source changes, stale packet refs, missing
+final evidence, or generated Python artifacts keep the goal active and route to
+`refresh_final_evidence` or fresh exit packet creation. General reviewer prose does not trigger this
+path merely by mentioning evidence types. Findings prefixed with `contract_change_required:` route
+to contract repair without terminal blocked. Exit review `unknown`, degraded output, or unchecked
 required ids creates a fresh review packet instead of being treated as missing evidence.
 
 ## Validation
@@ -376,6 +426,7 @@ required ids creates a fresh review packet instead of being treated as missing e
 - required non-root stages without dependencies;
 - unknown, optional-only, or cyclic dependencies;
 - missing or under-specified scope, work, gate, recovery, or budget JSON;
+- missing or invalid `max_stage_attempts`;
 - required acceptance rows without evidence requirements or verifiers;
 - unsupported `evidence_required_json` proof types that cannot be recorded by `evidence-add`;
 - unsupported `verifier_json` or `gate_json.verifiers` types;
@@ -394,8 +445,10 @@ gate, recovery, budget, and linked acceptance proof obligations. The Agent imple
 contract; it must not infer stage boundaries from prose.
 
 `packet-create --review-mode delta_review` scopes review to exactly one stage and all linked
-required acceptance ids for that stage. `packet-create --review-mode exit_review` covers the full
-required plan DAG and acceptance matrix.
+required acceptance ids for that stage. Delta preflight rejects stale referenced file evidence and
+outdated final command/test rows if they would be included in the packet. `packet-create
+--review-mode exit_review` requires every required stage to be `passed`, covers the full required
+plan DAG and acceptance matrix, and selects only current final-scoped evidence.
 
 Recorded review pass/fail aggregation is controlled by a canonical review gate policy stored in
 `cv.csv:input_refs_json`:
@@ -407,8 +460,10 @@ exit_strict: exit_review, minimum level 2, required reviewers codex-subagent and
 ```
 
 The policy requires full acceptance coverage, no degraded reviewers, and pass from all completed
-reviewers. `delta_light` is the default stage review policy; `exit_review` always normalizes to
-`exit_strict`.
+reviewers. `delta_light` is the default stage review policy only for low-risk stages. Review focus
+that names high-risk areas such as hidden behavior, security, architecture boundaries, absence
+claims, pruning, Goodhart, or proxy evidence requires `delta_kimi` unless the locked gate JSON
+explicitly records a lower-policy reason. `exit_review` always normalizes to `exit_strict`.
 
 `accepted` requires locked rows, required evidence that satisfies proof obligations, non-degraded
 stateless exit review, full acceptance coverage, and no unchecked required ids.

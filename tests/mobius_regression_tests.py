@@ -93,6 +93,58 @@ def compact_json(value: object) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
+def final_command_artifact(
+    *,
+    name: str = "test evidence",
+    command: str = "pytest",
+    exit_code: int = 0,
+    finished_at: str = "2999-01-01T00:00:01+00:00",
+) -> dict[str, object]:
+    return {
+        "type": "command_result",
+        "name": name,
+        "command": command,
+        "argv": [command],
+        "cwd": ".",
+        "exit_code": exit_code,
+        "validity_scope": "final",
+        "started_at": "2999-01-01T00:00:00+00:00",
+        "finished_at": finished_at,
+        "duration_ms": 1,
+        "log_sha256": "sha256:" + ("0" * 64),
+    }
+
+
+def ledger_snapshot(goal: Path) -> dict[str, bytes]:
+    names = [
+        "goal.csv",
+        "plan.csv",
+        "acceptance.csv",
+        "evidence.csv",
+        "packets.csv",
+        "cv.csv",
+        "loop.csv",
+        "review_attempts.csv",
+        "verdict.csv",
+    ]
+    return {name: (goal / name).read_bytes() for name in names if (goal / name).exists()}
+
+
+def ledger_mtime_snapshot(goal: Path) -> dict[str, int]:
+    names = [
+        "goal.csv",
+        "plan.csv",
+        "acceptance.csv",
+        "evidence.csv",
+        "packets.csv",
+        "cv.csv",
+        "loop.csv",
+        "review_attempts.csv",
+        "verdict.csv",
+    ]
+    return {name: (goal / name).stat().st_mtime_ns for name in names if (goal / name).exists()}
+
+
 def assert_loop_action_is_mirrored(result: dict[str, object]) -> None:
     loop = result.get("loop")
     if isinstance(loop, dict):
@@ -205,7 +257,6 @@ def stage_contract_args(
         "--budget-json",
         compact_json(
             {
-                "retry_limit": 2,
                 "max_stage_attempts": 3,
                 "stop_condition": "loop reports accepted, terminal blocked, agent_must_stop, unavailable required reviewer/tool, or explicit user interruption",
             }
@@ -368,7 +419,51 @@ def prepare_unlocked_goal(root: Path, session_id: str, slug_suffix: str) -> tupl
     return slug, goal
 
 
+def test_goal_start_updates_existing_planning_goal_without_packet_preflight() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        run(["--project-root", str(root), "init", "--session-id", "s"])
+        run(
+            [
+                "--project-root",
+                str(root),
+                "goal-start",
+                "--session-id",
+                "s",
+                "--slug",
+                "repeat",
+                "--title",
+                "first",
+                "--user-goal",
+                "first",
+            ]
+        )
+        result = run(
+            [
+                "--project-root",
+                str(root),
+                "goal-start",
+                "--session-id",
+                "s",
+                "--slug",
+                "repeat",
+                "--title",
+                "second",
+                "--user-goal",
+                "second",
+            ],
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        _slug, goal = goal_dir(root, "s", "repeat")
+        front, body = mobius.parse_goal_contract(goal / "goal.md")
+        assert front["title"] == "second"
+        assert "second" in body
+
+
 def create_packet(root: Path, session_id: str, slug: str, review_mode: str, acceptance_ids: list[str] | None = None) -> dict[str, object]:
+    if review_mode == "exit_review":
+        ensure_exit_ready(root, session_id, slug)
     command = [
         "--project-root",
         str(root),
@@ -402,6 +497,93 @@ def start_stage(root: Path, session_id: str, slug: str, plan_item_id: str = "P1"
         ).stdout
     )
     assert result["row"]["status"] == "running"
+
+
+def add_final_evidence_from_existing(root: Path, session_id: str, slug: str, goal: Path) -> None:
+    rows = list(csv.DictReader((goal / "evidence.csv").open(encoding="utf-8")))
+    acceptance_rows = [row for row in csv.DictReader((goal / "acceptance.csv").open(encoding="utf-8")) if row["status"] != "superseded"]
+    for acceptance in acceptance_rows:
+        acceptance_id = acceptance["id"]
+        requirements = json.loads(acceptance["evidence_required_json"])
+        for required in requirements:
+            evidence_type = required.get("type")
+            if evidence_type not in mobius.FINAL_SCOPED_EVIDENCE_TYPES:
+                continue
+            existing = [
+                row
+                for row in rows
+                if row["type"] == evidence_type
+                and acceptance_id in json.loads(row["supports_json"])
+                and json.loads(row["artifact_json"] or "{}").get("validity_scope") == "final"
+            ]
+            if existing:
+                continue
+            candidates = [
+                row
+                for row in rows
+                if row["type"] == evidence_type and acceptance_id in json.loads(row["supports_json"])
+            ]
+            if not candidates:
+                continue
+            artifact = json.loads(candidates[-1]["artifact_json"] or "{}")
+            artifact["validity_scope"] = "final"
+            if evidence_type in {"command_result", "test_result"}:
+                command = artifact.get("command", "pytest")
+                artifact.update(
+                    final_command_artifact(
+                        name=str(artifact.get("name") or required.get("name") or "test evidence"),
+                        command=str(command),
+                        exit_code=int(artifact.get("exit_code", required.get("exit_code", 0))),
+                    )
+                )
+                artifact["type"] = evidence_type
+            run(
+                [
+                    "--project-root",
+                    str(root),
+                    "evidence-add",
+                    "--session-id",
+                    session_id,
+                    "--goal-slug",
+                    slug,
+                    "--type",
+                    evidence_type,
+                    "--summary",
+                    f"final {evidence_type} evidence",
+                    "--supports",
+                    acceptance_id,
+                    "--artifact-json",
+                    compact_json(artifact),
+                ]
+            )
+            rows = list(csv.DictReader((goal / "evidence.csv").open(encoding="utf-8")))
+
+
+def ensure_exit_ready(root: Path, session_id: str, slug: str) -> Path:
+    _slug, goal = goal_dir(root, session_id, slug)
+    loop_rows = mobius.sync_loop_with_plan(goal, commit=False)
+    by_plan = {row["plan_item_id"]: row for row in loop_rows}
+    for plan in mobius.active_required_plan_items(goal):
+        plan_id = plan["id"]
+        if by_plan.get(plan_id, {}).get("status") == "passed":
+            continue
+        if by_plan.get(plan_id, {}).get("status") != "running":
+            start_stage(root, session_id, slug, plan_id)
+        acceptance_ids = mobius.required_acceptance_ids_for_plan_item(goal, plan_id)
+        packet = create_packet(root, session_id, slug, "delta_review", acceptance_ids)
+        mobius.record_cv_result(
+            root,
+            session_id,
+            slug,
+            delta_cv_envelope(f"cv_delta_{plan_id}", read_goal_id(goal), packet_id=str(packet["packet"]), checked_ids=acceptance_ids),
+            "delta_review",
+            target_plan_item_id=plan_id,
+            target_acceptance_ids=acceptance_ids,
+        )
+        loop_rows = mobius.sync_loop_with_plan(goal, commit=False)
+        by_plan = {row["plan_item_id"]: row for row in loop_rows}
+    add_final_evidence_from_existing(root, session_id, slug, goal)
+    return goal
 
 
 def write_delta_packet_row(root: Path, goal: Path, slug: str, packet_id: str = "packet_delta_001") -> dict[str, object]:
@@ -523,13 +705,15 @@ def delta_cv_envelope(
     reviewer_verdict: str | None = None,
     level: int = 2,
     policy_name: str = "delta_kimi",
+    checked_ids: list[str] | None = None,
 ) -> dict[str, object]:
     reviewer_verdict = reviewer_verdict or overall
+    checked_ids = checked_ids or ["A1"]
     policy = mobius.review_gate_policy("delta_review", {"name": policy_name})
-    reviewers = [reviewer_result("codex-subagent", "delta_review", ["A1"], reviewer_verdict)]
+    reviewers = [reviewer_result("codex-subagent", "delta_review", checked_ids, reviewer_verdict)]
     if "kimi-code" in policy["required_reviewers"]:
-        reviewers.append(reviewer_result("kimi-code", "delta_review", ["A1"], reviewer_verdict))
-    derived = mobius.derive_cv_aggregate(reviewers, ["A1"], "delta_review", policy)
+        reviewers.append(reviewer_result("kimi-code", "delta_review", checked_ids, reviewer_verdict))
+    derived = mobius.derive_cv_aggregate(reviewers, checked_ids, "delta_review", policy)
     return {
         "schema": "mobius.cv_result",
         "cv_id": cv_id,
@@ -835,15 +1019,25 @@ def test_contract_validation_rejects_bad_acceptance_and_verifiers() -> None:
             compact_json({"retries": 2, "stop": "old"}),
         )
         result = run(alias_budget, check=False)
-        assert any("budget_json requires retry_limit" in error for error in json.loads(result.stdout)["errors"])
+        assert any("budget_json requires max_stage_attempts" in error for error in json.loads(result.stdout)["errors"])
 
-        mixed_alias_budget = replace_arg(
+        unsupported_retry_budget = replace_arg(
             stage_contract_args(root, "s", slug),
             "--budget-json",
-            compact_json({"retry_limit": 2, "max_stage_attempts": 3, "stop_condition": "recorded review blocks or passes", "retries": 2}),
+            compact_json({"retry_limit": 2, "stop_condition": "recorded review blocks or passes"}),
         )
-        result = run(mixed_alias_budget, check=False)
-        assert any("budget_json contains noncanonical keys" in error for error in json.loads(result.stdout)["errors"])
+        result = run(unsupported_retry_budget, check=False)
+        errors = json.loads(result.stdout)["errors"]
+        assert any("budget_json contains unsupported key: retry_limit" in error for error in errors)
+        assert any("budget_json requires max_stage_attempts" in error for error in errors)
+
+        mixed_unsupported_budget = replace_arg(
+            stage_contract_args(root, "s", slug),
+            "--budget-json",
+            compact_json({"retry_limit": 2, "max_stage_attempts": 3, "stop_condition": "recorded review blocks or passes"}),
+        )
+        result = run(mixed_unsupported_budget, check=False)
+        assert any("budget_json contains unsupported key: retry_limit" in error for error in json.loads(result.stdout)["errors"])
 
 
 def test_contract_add_stage_rejects_without_half_written_rows() -> None:
@@ -1013,6 +1207,7 @@ def test_packet_read_recovers_existing_packet_without_csv_transport() -> None:
         assert audit["loop"]["next_required_action"] == "record_exit_review"
         assert audit["loop"]["next_command"] == f"packet-read --review-mode exit_review --packet-id {exit_packet['packet']}"
 
+        before_read_mtimes = ledger_mtime_snapshot(goal)
         read = json.loads(
             run(
                 [
@@ -1030,12 +1225,29 @@ def test_packet_read_recovers_existing_packet_without_csv_transport() -> None:
                 ]
             ).stdout
         )
+        after_read_mtimes = ledger_mtime_snapshot(goal)
+        assert after_read_mtimes == before_read_mtimes
         assert read["next_required_action"] == "record_exit_review"
         assert read["review_allowed"] is True
         assert read["packet"] == exit_packet
         assert read["packet_sha256"].startswith("sha256:")
         assert "packet_json" not in read
         assert "packet_id" not in read["packet"]
+        view = read["review_contract_view"]
+        assert view["schema"] == "mobius.review_contract_view"
+        assert view["derived"] is True
+        assert view["authoritative"] is False
+        assert view["storage"] == "none"
+        assert view["review_target"]["packet_id"] == exit_packet["packet"]
+        assert view["review_target"]["packet_sha256"] == read["packet_sha256"]
+        assert view["relation_to_prior"]["label"] == "new_review_target"
+        assert view["output_contract"]["required_result_block"] == "MOBIUS_CV_REVIEWER_RESULT"
+        assert view["output_contract"]["not_universal"] is True
+        assert view["evidence_boundary"]["compact_only"] is True
+        assert view["evidence_boundary"]["full_content_embedded"] is False
+        assert view["acceptance_matrix"][0]["falsifiers"]
+        assert "packet_json" not in view
+        assert "CROSS_REVIEW_RESULT_V1" not in json.dumps(view)
 
         mobius.record_cv_result(root, "s", slug, cv_envelope("cv_exit_001", read_goal_id(goal), packet_id=str(exit_packet["packet"])), "exit_review")
         reviewed = json.loads(
@@ -1058,6 +1270,7 @@ def test_packet_read_recovers_existing_packet_without_csv_transport() -> None:
         assert reviewed["next_required_action"] == "completion_allowed"
         assert reviewed["loop"]["agent_must_stop"] is True
         assert reviewed["review_allowed"] is False
+        assert reviewed["review_contract_view"]["relation_to_prior"]["label"] == "new_audit_of_current_workspace"
 
 
 def test_mcp_record_review_accepts_packet_id_and_packet_read_result() -> None:
@@ -1102,6 +1315,11 @@ def test_mcp_record_review_accepts_packet_id_and_packet_read_result() -> None:
                 ]
             ).stdout
         )
+        prompt_result = module.mobius_cv_build_subagent_prompt(packet=packet_read, review_mode="delta_review")
+        assert prompt_result["schema"] == "mobius.cv_subagent_prompt"
+        assert "Derived review contract view" in prompt_result["prompt"]
+        assert "not a ledger, packet schema" in prompt_result["prompt"]
+        assert "MOBIUS_CV_REVIEWER_RESULT" in prompt_result["prompt"]
         recorded = module.mobius_cv_record_delta_review(
             project_root=str(root),
             session_id="s",
@@ -1115,6 +1333,8 @@ def test_mcp_record_review_accepts_packet_id_and_packet_read_result() -> None:
         assert recorded["ok"] is True
         assert recorded["persisted"] is True
         assert recorded["packet_id"] == packet["packet"]
+        cv_row = [row for row in csv.DictReader((goal_dir(root, "s", slug)[1] / "cv.csv").open(encoding="utf-8")) if row["cv_id"] == "cv_delta_by_packet_read"][0]
+        assert "review_contract_view" not in json.loads(cv_row["input_refs_json"])
 
         slug, goal, _evidence = prepare_goal(root, "s", "mcp-mutated-packet")
         start_stage(root, "s", slug)
@@ -1543,15 +1763,8 @@ def test_evidence_validity_scope_distinguishes_stage_final_and_historical() -> N
                     "--artifact-json",
                     compact_json(
                         {
-                            "type": "command_result",
-                            "name": "scoped proof",
-                            "command": "pytest",
-                            "argv": ["pytest"],
-                            "cwd": ".",
-                            "exit_code": 0,
-                            "duration_seconds": 1.0,
-                            "output_ref": "logs/scoped-proof.txt",
-                            "validity_scope": "final",
+                            **final_command_artifact(name="scoped proof"),
+                            "stdout_sha256": "sha256:" + ("1" * 64),
                         }
                     ),
                 ]
@@ -1571,8 +1784,8 @@ def test_packet_is_lightweight_index_and_hash_checked() -> None:
         assert packet["schema"] == "mobius.packet"
         assert packet["ledger"]["root"].startswith(".mobius/runs/")
         assert len(packet["ledger"]["hash"]) == 7
-        assert packet["coverage"] == {"A1": ["E1"]}
-        assert packet["refs"]["E1"][2].startswith("h:")
+        assert packet["coverage"] == {"A1": ["E2"]}
+        assert packet["refs"]["E2"][2].startswith("h:")
         assert list(row) == mobius.PACKET_FIELDS
         assert "inputs" not in packet
         assert "content" not in json.dumps(packet)
@@ -1594,7 +1807,7 @@ def test_packet_is_lightweight_index_and_hash_checked() -> None:
                 "--supports",
                 "A1",
                 "--artifact-json",
-                compact_json({"type": "command_result", "name": "test evidence", "command": "pytest", "exit_code": 0}),
+                compact_json(final_command_artifact()),
             ]
         )
         _normalized, errors = mobius.validate_packet_for_goal(goal, packet, "exit_review")
@@ -1602,11 +1815,50 @@ def test_packet_is_lightweight_index_and_hash_checked() -> None:
 
 
 def test_file_ref_and_change_set_scope_evidence_are_compact_refs() -> None:
+    if shutil.which("git") is None:
+        return
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        subprocess.run(["git", "-C", str(root), "init"], text=True, capture_output=True, check=True)
+        (root / ".gitignore").write_text(".mobius/\n", encoding="utf-8")
         artifact = root / "result.txt"
         artifact.write_text("proof\n", encoding="utf-8")
-        slug, goal, _evidence = prepare_goal(root, "s", "evidence-index")
+        run(["--project-root", str(root), "init", "--session-id", "s"])
+        run(
+            [
+                "--project-root",
+                str(root),
+                "goal-start",
+                "--session-id",
+                "s",
+                "--slug",
+                "evidence-index",
+                "--title",
+                "evidence-index",
+                "--user-goal",
+                "evidence-index",
+            ]
+        )
+        slug, goal = goal_dir(root, "s", "evidence-index")
+        command = stage_contract_args(root, "s", slug)
+        command[command.index("--acceptance-json") + 1] = compact_json(
+            [
+                {
+                    "id": "A1",
+                    "requirement": "Final file and change-set proofs are recorded",
+                    "observable_outcome": "exit packet refs contain compact path proofs",
+                    "evidence_required": [
+                        {"type": "file_ref", "name": "result.txt", "validity_scope": "final"},
+                        {"type": "change_set_scope", "name": "source scope", "validity_scope": "final"},
+                    ],
+                    "verifier": [{"type": "mobiuscv_delta"}, {"type": "mobiuscv_exit"}],
+                    "review_focus": ["file and change scope refs are compact"],
+                    "required": True,
+                }
+            ]
+        )
+        run(command)
+        run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
         run(
             [
                 "--project-root",
@@ -1622,8 +1874,16 @@ def test_file_ref_and_change_set_scope_evidence_are_compact_refs() -> None:
                 "file proves A1",
                 "--supports",
                 "A1",
-                "--artifact",
-                str(artifact),
+                "--artifact-json",
+                compact_json(
+                    {
+                        "type": "file_ref",
+                        "name": "result.txt",
+                        "path": "result.txt",
+                        "purpose": "final result.txt proof",
+                        "validity_scope": "final",
+                    }
+                ),
             ]
         )
         run(
@@ -1646,22 +1906,23 @@ def test_file_ref_and_change_set_scope_evidence_are_compact_refs() -> None:
                     {
                         "type": "change_set_scope",
                         "name": "source scope",
-                        "paths": ["scripts/mobius.py"],
+                        "paths": ["result.txt", ".gitignore"],
                         "allowed_change_classes": ["source"],
                         "forbidden_paths": [".mobius/**"],
                         "coverage": {"tracked": True, "staged": True, "untracked": True, "intent_to_add": True},
+                        "validity_scope": "final",
                     }
                 ),
             ]
         )
         packet = create_packet(root, "s", slug, "exit_review")
         refs = packet["refs"]
-        assert refs["E2"][0] == "file_ref"
-        assert refs["E2"][1] == "result.txt"
+        assert refs["E1"][0] == "file_ref"
+        assert refs["E1"][1] == "result.txt"
+        assert refs["E1"][2].startswith("h:")
+        assert refs["E2"][0] == "change_set_scope"
+        assert refs["E2"][1] == "result.txt,.gitignore"
         assert refs["E2"][2].startswith("h:")
-        assert refs["E3"][0] == "change_set_scope"
-        assert refs["E3"][1] == "scripts/mobius.py"
-        assert refs["E3"][2].startswith("h:")
         assert "sha256:" not in json.dumps(packet)
         assert mobius.validate_packet_for_goal(goal, packet, "exit_review")[1] == []
 
@@ -1899,6 +2160,133 @@ def test_evidence_path_boundaries_are_enforced() -> None:
             assert expected in json.loads(result.stdout)["errors"][0]
 
 
+def test_change_set_scope_preflight_fails_closed_without_git_repository() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "src").mkdir()
+        (root / "src" / "proof.py").write_text("print('ok')\n", encoding="utf-8")
+        run(["--project-root", str(root), "goal-start", "--session-id", "s", "--slug", "scope-no-git", "--title", "scope", "--user-goal", "scope"])
+        slug, _goal = goal_dir(root, "s", "scope-no-git")
+        command = stage_contract_args(root, "s", slug)
+        command[command.index("--acceptance-json") + 1] = compact_json(
+            [
+                {
+                    "id": "A1",
+                    "requirement": "Change-set scope is verified from git status",
+                    "observable_outcome": "packet preflight fails when git changed-path coverage cannot be computed",
+                    "evidence_required": [{"type": "change_set_scope", "name": "source scope"}],
+                    "verifier": [{"type": "change_set_scope", "name": "source scope"}, {"type": "mobiuscv_delta"}],
+                    "review_focus": ["scope coverage"],
+                    "required": True,
+                }
+            ]
+        )
+        run(command)
+        run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
+        run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "change_set_scope",
+                "--summary",
+                "source scope",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json(
+                    {
+                        "type": "change_set_scope",
+                        "name": "source scope",
+                        "paths": ["src/**"],
+                        "allowed_change_classes": ["source"],
+                        "forbidden_paths": [".mobius/**"],
+                        "coverage": {"tracked": True, "staged": True, "untracked": True, "intent_to_add": True},
+                    }
+                ),
+            ]
+        )
+        start_stage(root, "s", slug)
+        result = run(
+            ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "delta_review", "--acceptance-id", "A1"],
+            check=False,
+        )
+        assert result.returncode == 2
+        assert "change_set_scope E1: git repository is required for change_set_scope preflight" in json.loads(result.stdout)["errors"][0]
+
+
+def test_delta_packet_blocks_change_set_scope_that_omits_current_changes() -> None:
+    if shutil.which("git") is None:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        subprocess.run(["git", "-C", str(root), "init"], text=True, capture_output=True, check=True)
+        (root / ".gitignore").write_text(".mobius/\n", encoding="utf-8")
+        (root / "src").mkdir()
+        (root / "src" / "proof.py").write_text("print('ok')\n", encoding="utf-8")
+        run(["--project-root", str(root), "goal-start", "--session-id", "s", "--slug", "scope-preflight", "--title", "scope", "--user-goal", "scope"])
+        slug, _goal = goal_dir(root, "s", "scope-preflight")
+        command = stage_contract_args(root, "s", slug)
+        command[command.index("--acceptance-json") + 1] = compact_json(
+            [
+                {
+                    "id": "A1",
+                    "requirement": "Change-set scope covers current changes",
+                    "observable_outcome": "change_set_scope evidence includes every current changed path",
+                    "evidence_required": [{"type": "change_set_scope", "name": "source scope"}],
+                    "verifier": [{"type": "change_set_scope", "name": "source scope"}, {"type": "mobiuscv_delta"}],
+                    "review_focus": ["scope coverage"],
+                    "required": True,
+                }
+            ]
+        )
+        run(command)
+        run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
+        run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "change_set_scope",
+                "--summary",
+                "source scope",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json(
+                    {
+                        "type": "change_set_scope",
+                        "name": "source scope",
+                        "paths": ["src/**", ".gitignore"],
+                        "allowed_change_classes": ["source"],
+                        "forbidden_paths": [".mobius/**"],
+                        "coverage": {"tracked": True, "staged": True, "untracked": True, "intent_to_add": True},
+                    }
+                ),
+            ]
+        )
+        start_stage(root, "s", slug)
+        (root / "docs").mkdir()
+        (root / "docs" / "leak.md").write_text("out of scope\n", encoding="utf-8")
+        result = run(
+            ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "delta_review", "--acceptance-id", "A1"],
+            check=False,
+        )
+        assert result.returncode == 2
+        assert "change_set_scope E1 does not cover current changed paths" in json.loads(result.stdout)["errors"][0]
+        assert "docs/" in json.loads(result.stdout)["errors"][0]
+
+
 def test_csv_row_shaped_packet_is_not_transport() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1926,13 +2314,81 @@ def test_recorded_delta_pass_updates_loop_and_records_policy() -> None:
         )
         assert_loop_action_is_mirrored(recorded)
         assert recorded["gate"] == "awaiting_exit_review"
-        assert recorded["next_required_action"] == "create_exit_packet"
-        assert recorded["loop"]["next_required_action"] == "create_exit_packet"
+        assert recorded["next_required_action"] == "refresh_final_evidence"
+        assert recorded["loop"]["next_required_action"] == "refresh_final_evidence"
         loop_row = list(csv.DictReader((goal / "loop.csv").open(encoding="utf-8")))[0]
         assert loop_row["status"] == "passed"
         assert list(csv.DictReader((goal / "loop.csv").open(encoding="utf-8")))[0]["last_cv_id"] == "cv_delta_001"
+        acceptance_row = list(csv.DictReader((goal / "acceptance.csv").open(encoding="utf-8")))[0]
+        assert acceptance_row["status"] == "unknown"
+        assert acceptance_row["cv_id"] == ""
+        assert acceptance_row["delta_status"] == "pass"
+        assert acceptance_row["delta_cv_id"] == "cv_delta_001"
+        assert acceptance_row["delta_verified_at"]
         input_refs = json.loads(list(csv.DictReader((goal / "cv.csv").open(encoding="utf-8")))[0]["input_refs_json"])
         assert input_refs["review_policy"]["name"] == "delta_kimi"
+        audit = json.loads(run(["--project-root", str(root), "ledger-audit", "--session-id", "s", "--goal-slug", slug]).stdout)["audit"]
+        assert audit["delta_verified_acceptance_ids"] == ["A1"]
+        assert audit["final_unverified_acceptance_ids"] == ["A1"]
+
+
+def test_evidence_list_is_read_only_and_reports_final_refresh_template() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "evidence-list")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
+        before = ledger_snapshot(goal)
+        listed = json.loads(
+            run(["--project-root", str(root), "evidence-list", "--session-id", "s", "--goal-slug", slug, "--acceptance-id", "A1"]).stdout
+        )
+        assert listed["next_required_action"] == "refresh_final_evidence"
+        assert listed["evidence"][0]["validity_scope"] == "stage"
+        assert listed["final_evidence"]["errors"]
+        template = listed["final_evidence"]["refresh_templates"][0]
+        assert template["acceptance_id"] == "A1"
+        assert template["evidence_type"] == "command_result"
+        assert "--artifact-json" in template["argv_prefix"]
+        assert ledger_snapshot(goal) == before
+
+
+def test_packet_read_returns_reviewer_checklist_for_frozen_packet() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "packet-checklist")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        before = ledger_snapshot(goal)
+        read = json.loads(
+            run(
+                [
+                    "--project-root",
+                    str(root),
+                    "packet-read",
+                    "--session-id",
+                    "s",
+                    "--goal-slug",
+                    slug,
+                    "--review-mode",
+                    "delta_review",
+                    "--packet-id",
+                    str(packet["packet"]),
+                ]
+            ).stdout
+        )
+        assert read["reviewer_checklist"][0]["id"] == "A1"
+        assert "Does any checked evidence fail" in read["reviewer_checklist"][0]["disconfirmers"][0]
+        assert read["reviewer_checklist"][0]["refs_present"] == sorted(packet["refs"])
+        assert ledger_snapshot(goal) == before
 
 
 def test_ledger_audit_reports_missing_exit_cv() -> None:
@@ -1960,6 +2416,51 @@ def test_ledger_audit_reports_missing_exit_cv() -> None:
         assert audit["exit_cv_id"] == ""
         assert audit["unverified_acceptance_ids"] == ["A1"]
         assert audit["next_required_action"] == "record_exit_review"
+
+
+def test_exit_packet_requires_all_required_stages_passed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal = prepare_unlocked_goal(root, "s", "exit-stage-preflight")
+        add_stage(root, "s", slug, plan_id="P2", acceptance_id="A2", depends=["P1"])
+        run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
+        run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "command_result",
+                "--summary",
+                "test evidence",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json({"type": "command_result", "name": "test evidence", "command": "pytest", "exit_code": 0}),
+            ]
+        )
+        start_stage(root, "s", slug, "P1")
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_p1", read_goal_id(goal), packet_id=str(packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
+        result = run(
+            ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"],
+            check=False,
+        )
+        errors = json.loads(result.stdout)["errors"]
+        assert result.returncode == 2
+        assert any("exit_review requires required stage P2 to be passed" in error for error in errors)
 
 
 def test_exit_review_interruption_is_visible() -> None:
@@ -2002,6 +2503,23 @@ def test_status_lists_active_goals_and_loop_next_is_not_public() -> None:
         assert "invalid choice" in removed.stderr
 
 
+def test_read_commands_preserve_ledger_bytes_and_mtimes_after_loop_exists() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "loop-status-read")
+        start_stage(root, "s", slug)
+        before = ledger_snapshot(goal)
+        before_mtimes = ledger_mtime_snapshot(goal)
+        status = json.loads(run(["--project-root", str(root), "loop-status", "--session-id", "s", "--goal-slug", slug]).stdout)
+        assert status["rows"][0]["status"] == "running"
+        run(["--project-root", str(root), "explain", "--session-id", "s", "--goal-slug", slug])
+        run(["--project-root", str(root), "ledger-audit", "--session-id", "s", "--goal-slug", slug])
+        run(["--project-root", str(root), "status"])
+        run(["--project-root", str(root), "evidence-list", "--session-id", "s", "--goal-slug", slug])
+        assert ledger_snapshot(goal) == before
+        assert ledger_mtime_snapshot(goal) == before_mtimes
+
+
 def test_explain_summarizes_goal_loop_packet_cv_and_attempts() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -2009,7 +2527,15 @@ def test_explain_summarizes_goal_loop_packet_cv_and_attempts() -> None:
         start_stage(root, "s", slug)
         packet = create_packet(root, "s", slug, "delta_review", ["A1"])
         attempt_id = mobius.review_attempt_started(goal, str(packet["packet"]), "delta_review")
-        mobius.review_attempt_finished(goal, attempt_id, "failed", "timeout")
+        mobius.review_attempt_finished(
+            goal,
+            attempt_id,
+            "failed",
+            "timeout",
+            failure_kind="reviewer_timeout",
+            retryable=True,
+            diagnostic_ref="timeout",
+        )
         explain = json.loads(run(["--project-root", str(root), "explain", "--session-id", "s", "--goal-slug", slug]).stdout)
         assert explain["next_required_action"] == "retry_review"
         assert explain["pending_reason"] == "retry_review"
@@ -2069,6 +2595,121 @@ def test_nonretryable_review_attempt_stops_for_infra_repair() -> None:
         assert explain["review_attempts"]["failed"][0]["retryable"] == "false"
 
 
+def test_contract_validation_rejects_malformed_review_attempt_rows() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "bad-attempt-row")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.write_csv_rows(
+            goal / "review_attempts.csv",
+            mobius.REVIEW_ATTEMPT_FIELDS,
+            [
+                {
+                    "schema": "mobius.review_attempt",
+                    "attempt_id": "attempt_001",
+                    "packet_id": str(packet["packet"]),
+                    "review_mode": "delta_review",
+                    "status": "failed",
+                    "started_at": "2026-07-01T00:00:00+00:00",
+                    "finished_at": "2026-07-01T00:00:01+00:00",
+                    "reviewer_summary_ref": "timeout",
+                    "failure_kind": "",
+                    "retryable": "",
+                    "diagnostic_ref": "",
+                    "retry_count": "0",
+                }
+            ],
+        )
+        result = run(["--project-root", str(root), "explain", "--session-id", "s", "--goal-slug", slug], check=False)
+        assert result.returncode == 2
+        errors = json.loads(result.stdout)["errors"]
+        assert any("review_attempts.csv:attempt_001: failed attempt requires failure_kind" in error for error in errors)
+        assert any("review_attempts.csv:attempt_001: failed attempt retryable must be true or false" in error for error in errors)
+        assert any("review_attempts.csv:attempt_001: failed attempt requires diagnostic_ref" in error for error in errors)
+
+        mobius.write_csv_rows(
+            goal / "review_attempts.csv",
+            mobius.REVIEW_ATTEMPT_FIELDS,
+            [
+                {
+                    "schema": "mobius.review_attempt",
+                    "attempt_id": "attempt_001",
+                    "packet_id": str(packet["packet"]),
+                    "review_mode": "delta_review",
+                    "status": "failed",
+                    "started_at": "2026-07-01T00:00:00+00:00",
+                    "finished_at": "2026-07-01T00:00:01+00:00",
+                    "reviewer_summary_ref": "",
+                    "failure_kind": "reviewer_timeout",
+                    "retryable": "true",
+                    "diagnostic_ref": "timeout",
+                    "retry_count": "99",
+                }
+            ],
+        )
+        incoherent = run(["--project-root", str(root), "explain", "--session-id", "s", "--goal-slug", slug], check=False)
+        assert incoherent.returncode == 2
+        incoherent_errors = json.loads(incoherent.stdout)["errors"]
+        assert any(
+            "review_attempts.csv:attempt_001: retry_count must be 0 for packet_id/review_mode sequence" in error
+            for error in incoherent_errors
+        )
+
+
+def test_high_risk_review_focus_requires_delta_kimi_policy() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        run(["--project-root", str(root), "goal-start", "--session-id", "s", "--slug", "high-risk-policy", "--title", "high-risk", "--user-goal", "high-risk"])
+        slug, goal = goal_dir(root, "s", "high-risk-policy")
+        command = stage_contract_args(root, "s", slug)
+        command[command.index("--gate-json") + 1] = compact_json(
+            {
+                "entry": ["contract locked"],
+                "exit": ["tests pass"],
+                "verifiers": ["command_result", "mobiuscv_delta"],
+                "review_focus": ["hidden behavior and security boundary are checked"],
+            }
+        )
+        run(command)
+        run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
+        run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "command_result",
+                "--summary",
+                "test evidence",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json({"type": "command_result", "name": "test evidence", "command": "pytest", "exit_code": 0}),
+            ]
+        )
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        assert mobius.review_policy_for_delta_targets(goal, "P1", ["A1"], {"level": 1})["name"] == "delta_kimi"
+        result_cv = delta_cv_envelope(
+            "cv_delta_light",
+            read_goal_id(goal),
+            packet_id=str(packet["packet"]),
+            policy_name="delta_light",
+            level=1,
+        )
+        try:
+            mobius.record_cv_result(root, "s", slug, result_cv, "delta_review", target_plan_item_id="P1", target_acceptance_ids=["A1"])
+        except mobius.MobiusError as exc:
+            assert "input_refs.review_policy does not match required delta review policy" in str(exc)
+        else:
+            raise AssertionError("high-risk delta accepted delta_light policy")
+
+
 def test_delta_light_policy_and_mcp_default_skip_kimi() -> None:
     module = load_mobius_cv_mcp_module()
     with tempfile.TemporaryDirectory() as tmp:
@@ -2095,7 +2736,7 @@ def test_delta_light_policy_and_mcp_default_skip_kimi() -> None:
         )
         assert_loop_action_is_mirrored(recorded)
         assert recorded["gate"] == "awaiting_exit_review"
-        assert recorded["next_required_action"] == "create_exit_packet"
+        assert recorded["next_required_action"] == "refresh_final_evidence"
         assert reviewer_called["value"] is False
         input_refs = json.loads(list(csv.DictReader((goal / "cv.csv").open(encoding="utf-8")))[0]["input_refs_json"])
         assert input_refs["review_policy"]["name"] == "delta_light"
@@ -2123,7 +2764,7 @@ def test_raw_review_retention_compacts_pass_and_keeps_non_pass_artifacts() -> No
         )
         assert_loop_action_is_mirrored(recorded)
         assert recorded["gate"] == "awaiting_exit_review"
-        assert recorded["next_required_action"] == "create_exit_packet"
+        assert recorded["next_required_action"] == "refresh_final_evidence"
         cv_row = list(csv.DictReader((goal / "cv.csv").open(encoding="utf-8")))[0]
         assert cv_row["raw_ref"] == ""
         assert len(cv_row["raw_hash_tail"]) == 7
@@ -2218,7 +2859,7 @@ def test_delta_pass_requires_satisfied_proof_obligations() -> None:
                     "schema": "mobius.evidence",
                     "id": "E1",
                     "goal_id": read_goal_id(goal),
-                    "type": "human",
+                    "type": "human_assertion",
                     "summary": "does not satisfy command proof",
                     "supports_json": mobius.as_json_cell(["A1"]),
                     "artifact_json": mobius.as_json_cell({}),
@@ -2284,7 +2925,7 @@ def test_repair_budget_exhaustion_stops_loop() -> None:
         command = replace_arg(
             stage_contract_args(root, "s", slug),
             "--budget-json",
-            compact_json({"retry_limit": 0, "max_stage_attempts": 1, "stop_condition": "recorded review blocks or passes"}),
+            compact_json({"max_stage_attempts": 1, "stop_condition": "recorded review blocks or passes"}),
         )
         run(command)
         run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
@@ -2328,8 +2969,8 @@ def test_repair_budget_exhaustion_stops_loop() -> None:
 
 def test_delta_unknown_review_quality_routes_to_new_packet_before_budget_or_evidence() -> None:
     scenarios = {
-        "delta-unknown-budget": {"budget": {"retry_limit": 0, "max_stage_attempts": 1, "stop_condition": "recorded review blocks or passes"}, "evidence": True},
-        "delta-unknown-evidence": {"budget": {"retry_limit": 1, "max_stage_attempts": 2, "stop_condition": "recorded review blocks or passes"}, "evidence": False},
+        "delta-unknown-budget": {"budget": {"max_stage_attempts": 1, "stop_condition": "recorded review blocks or passes"}, "evidence": True},
+        "delta-unknown-evidence": {"budget": {"max_stage_attempts": 2, "stop_condition": "recorded review blocks or passes"}, "evidence": False},
     }
     for slug_suffix, config in scenarios.items():
         with tempfile.TemporaryDirectory() as tmp:
@@ -2522,15 +3163,26 @@ def test_recorded_exit_failure_repairs_earliest_stage_and_repairable_blocked_ref
             "exit_review",
         )
         assert_loop_action_is_mirrored(recorded)
-        assert recorded["gate"] == "running"
-        assert recorded["next_required_action"] == "repair_stage"
+        assert recorded["gate"] == "awaiting_exit_review"
+        assert recorded["next_required_action"] == "loop_reopen_stage"
         assert recorded["loop"]["agent_must_continue"] is True
-        assert recorded["loop"]["next_command"] == "loop-start-stage --plan-item-id P1"
+        assert recorded["loop"]["next_argv"][:8] == [
+            "loop-reopen-stage",
+            "--session-id",
+            "s",
+            "--goal-slug",
+            slug,
+            "--plan-item-id",
+            "P1",
+            "--from-cv-id",
+        ]
         assert list(csv.DictReader((goal / "goal.csv").open(encoding="utf-8")))[0]["status"] == "active"
         loop_row = list(csv.DictReader((goal / "loop.csv").open(encoding="utf-8")))[0]
-        assert loop_row["status"] == "running"
-        assert loop_row["last_cv_id"] == "cv_exit_fail"
-        start_stage(root, "s", slug)
+        assert loop_row["status"] == "passed"
+        assert loop_row["last_cv_id"] == "cv_delta_001"
+        reopen = json.loads(run(["--project-root", str(root), *recorded["loop"]["next_argv"]]).stdout)
+        assert reopen["row"]["status"] == "running"
+        assert reopen["row"]["last_cv_id"] == "cv_exit_fail"
         repair_delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
         mobius.record_cv_result(
             root,
@@ -2613,6 +3265,26 @@ def test_recorded_exit_terminal_blocked_remains_terminal() -> None:
         assert recorded["gate"] == "blocked"
         assert recorded["blocked_kind"] == "terminal_blocked"
         assert recorded["loop"]["agent_must_stop"] is True
+        assert list(csv.DictReader((goal / "goal.csv").open(encoding="utf-8")))[0]["status"] == "blocked"
+
+        slug, goal, _evidence = prepare_goal(root, "s", "exit-file-ref-substantive")
+        packet = create_packet(root, "s", slug, "exit_review")
+        recorded = mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            blocked_exit_cv(
+                "cv_exit_file_ref_substantive",
+                read_goal_id(goal),
+                str(packet["packet"]),
+                "file_ref evidence does not prove the locked architecture boundary",
+            ),
+            "exit_review",
+        )
+        assert_loop_action_is_mirrored(recorded)
+        assert recorded["gate"] == "blocked"
+        assert recorded["blocked_kind"] == "terminal_blocked"
+        assert recorded["next_required_action"] == "goal_blocked"
         assert list(csv.DictReader((goal / "goal.csv").open(encoding="utf-8")))[0]["status"] == "blocked"
 
 
@@ -2767,7 +3439,7 @@ def test_recorded_exit_fail_budget_exhaustion_persists_blocked_loop() -> None:
         command = replace_arg(
             stage_contract_args(root, "s", slug),
             "--budget-json",
-            compact_json({"retry_limit": 0, "max_stage_attempts": 1, "stop_condition": "recorded review blocks or passes"}),
+            compact_json({"max_stage_attempts": 1, "stop_condition": "recorded review blocks or passes"}),
         )
         run(command)
         run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
@@ -2810,14 +3482,96 @@ def test_recorded_exit_fail_budget_exhaustion_persists_blocked_loop() -> None:
             "exit_review",
         )
         assert_loop_action_is_mirrored(recorded)
-        assert recorded["gate"] == "blocked"
+        assert recorded["gate"] == "awaiting_exit_review"
         assert recorded["next_required_action"] == "repair_budget_exhausted"
         assert recorded["loop"]["agent_must_stop"] is True
         assert recorded["loop"]["stop_reason"] == "repair_budget_exhausted"
         loop_row = list(csv.DictReader((goal / "loop.csv").open(encoding="utf-8")))[0]
-        assert loop_row["status"] == "blocked"
-        assert loop_row["last_cv_id"] == "cv_exit_budget"
-        assert any(str(item).startswith("repair_budget_exhausted:") for item in json.loads(loop_row["blocking_findings_json"]))
+        assert loop_row["status"] == "passed"
+        blocked_reopen = run(
+            [
+                "--project-root",
+                str(root),
+                "loop-reopen-stage",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--plan-item-id",
+                "P1",
+                "--from-cv-id",
+                "cv_exit_budget",
+                "--reason",
+                "exit repair over budget",
+            ],
+            check=False,
+        )
+        assert blocked_reopen.returncode == 2
+        assert "repair_budget_exhausted" in json.loads(blocked_reopen.stdout)["errors"][0]
+
+
+def test_passed_stage_requires_explicit_reopen_not_loop_start() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, goal, _evidence = prepare_goal(root, "s", "explicit-reopen")
+        start_stage(root, "s", slug)
+        packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
+        restart = run(
+            ["--project-root", str(root), "loop-start-stage", "--session-id", "s", "--goal-slug", slug, "--plan-item-id", "P1"],
+            check=False,
+        )
+        assert restart.returncode == 2
+        assert "plan item is not the next runnable stage" in json.loads(restart.stdout)["errors"][0]
+        missing_reason = run(
+            [
+                "--project-root",
+                str(root),
+                "loop-reopen-stage",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--plan-item-id",
+                "P1",
+                "--from-cv-id",
+                "cv_delta_001",
+                "--reason",
+                "",
+            ],
+            check=False,
+        )
+        assert missing_reason.returncode == 2
+        assert "reason is required" in json.loads(missing_reason.stdout)["errors"][0]
+        reopened = json.loads(
+            run(
+                [
+                    "--project-root",
+                    str(root),
+                    "loop-reopen-stage",
+                    "--session-id",
+                    "s",
+                    "--goal-slug",
+                    slug,
+                    "--plan-item-id",
+                    "P1",
+                    "--from-cv-id",
+                    "cv_delta_001",
+                    "--reason",
+                    "explicit repair",
+                ]
+            ).stdout
+        )
+        assert reopened["row"]["status"] == "running"
+        assert reopened["row"]["last_cv_id"] == "cv_delta_001"
 
 
 def test_packet_id_is_one_shot_for_delta_review() -> None:
@@ -2883,6 +3637,24 @@ def test_mobius_cv_prompt_allows_autonomous_review_tools() -> None:
     assert "compatibility, fallback, alias, glue, or history-preserving code" in prompt
     assert "MOBIUS_CV_REVIEWER_RESULT" in prompt
     assert prompt.rstrip().endswith("END_MOBIUS_CV_REVIEWER_RESULT")
+    view_prompt = module.review_prompt(
+        '{"schema":"mobius.packet","coverage":{"A1":["E1"]},"refs":{"E1":["command_result","pytest","h:123abcd"]}}',
+        "exit_review",
+        ["A1"],
+        "kimi-code",
+        review_contract_view={
+            "schema": "mobius.review_contract_view",
+            "derived": True,
+            "authoritative": False,
+            "storage": "none",
+            "output_contract": {"required_result_block": "MOBIUS_CV_REVIEWER_RESULT"},
+        },
+    )
+    assert "Derived review contract view" in view_prompt
+    assert "not a ledger, packet schema" in view_prompt
+    assert '"authoritative": false' in view_prompt
+    assert "MOBIUS_CV_REVIEWER_RESULT" in view_prompt
+    assert view_prompt.rstrip().endswith("END_MOBIUS_CV_REVIEWER_RESULT")
     context_prompt = module.review_prompt(
         '{"schema":"mobius.packet","coverage":{"A1":["E1"]},"refs":{"E1":["file_ref","README.md","h:123abcd"]}}',
         "exit_review",
@@ -3193,7 +3965,7 @@ def test_exit_review_preflight_blocks_invisible_file_ref_before_attempt() -> Non
             assert recorded["ok"] is False
             assert recorded["persisted"] is False
             assert recorded["next_required_action"] == "refresh_final_evidence"
-            assert "file_ref E1 is not current final evidence: VISIBLE.txt is missing" in recorded["errors"][0]
+            assert "file_ref E2 is not current final evidence: VISIBLE.txt is missing" in recorded["errors"][0]
             assert reviewer_called["value"] is False
             assert mobius.packet_has_recorded_review(goal, str(exit_packet["packet"])) is False
             attempts = list(csv.DictReader((goal / "review_attempts.csv").open(encoding="utf-8")))
@@ -3202,14 +3974,14 @@ def test_exit_review_preflight_blocks_invisible_file_ref_before_attempt() -> Non
         module.shutil.which = previous_which
 
 
-def test_exit_packet_create_blocks_stale_file_ref_before_review() -> None:
+def test_exit_packet_uses_final_file_ref_and_ignores_stale_stage_ref() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         proof = root / "proof.txt"
         proof.write_text("before\n", encoding="utf-8")
         run(["--project-root", str(root), "init", "--session-id", "s"])
         run(["--project-root", str(root), "goal-start", "--session-id", "s", "--slug", "stale-exit-packet", "--title", "stale-exit-packet", "--user-goal", "stale-exit-packet"])
-        slug, _goal = goal_dir(root, "s", "stale-exit-packet")
+        slug, goal = goal_dir(root, "s", "stale-exit-packet")
         run(file_ref_stage_args(root, "s", slug))
         run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
         run(
@@ -3231,6 +4003,17 @@ def test_exit_packet_create_blocks_stale_file_ref_before_review() -> None:
                 "proof.txt",
             ]
         )
+        start_stage(root, "s", slug)
+        delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(delta_packet["packet"]), policy_name="delta_light"),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
         proof.write_text("after\n", encoding="utf-8")
         result = run(
             ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"],
@@ -3239,7 +4022,42 @@ def test_exit_packet_create_blocks_stale_file_ref_before_review() -> None:
         payload = json.loads(result.stdout)
         assert result.returncode == 2
         assert payload["next_required_action"] == "refresh_final_evidence"
-        assert "file_ref E1 is stale" in payload["errors"][0]
+        assert "acceptance A1 is missing final-scoped file_ref evidence" in payload["errors"][0]
+
+        run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "file_ref",
+                "--summary",
+                "final visible file proof",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json({"type": "file_ref", "path": "proof.txt", "validity_scope": "final"}),
+            ]
+        )
+        success = json.loads(
+            run(["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"]).stdout
+        )
+        assert success["packet"]["coverage"]["A1"] == ["E2"]
+        assert sorted(success["packet"]["refs"]) == ["E2"]
+
+        proof.write_text("after again\n", encoding="utf-8")
+        stale = json.loads(
+            run(
+                ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"],
+                check=False,
+            ).stdout
+        )
+        assert stale["next_required_action"] == "refresh_final_evidence"
+        assert "file_ref E2 is stale" in stale["errors"][0]
 
 
 def test_exit_packet_create_blocks_outdated_final_command_evidence() -> None:
@@ -3247,7 +4065,20 @@ def test_exit_packet_create_blocks_outdated_final_command_evidence() -> None:
         root = Path(tmp)
         source = root / "src.py"
         source.write_text("before\n", encoding="utf-8")
-        slug, _goal, _evidence = prepare_goal(root, "s", "stale-command-evidence")
+        slug, goal, _evidence = prepare_goal(root, "s", "stale-command-evidence")
+        start_stage(root, "s", slug)
+        delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(delta_packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
+        )
+        stale_artifact = final_command_artifact(finished_at="2000-01-01T00:00:01+00:00")
+        stale_artifact["started_at"] = "2000-01-01T00:00:00+00:00"
         run(
             [
                 "--project-root",
@@ -3264,16 +4095,7 @@ def test_exit_packet_create_blocks_outdated_final_command_evidence() -> None:
                 "--supports",
                 "A1",
                 "--artifact-json",
-                compact_json(
-                    {
-                        "type": "command_result",
-                        "name": "test evidence",
-                        "command": "pytest",
-                        "exit_code": 0,
-                        "validity_scope": "final",
-                        "recorded_at": "2000-01-01T00:00:00+00:00",
-                    }
-                ),
+                compact_json(stale_artifact),
             ]
         )
         source.write_text("after\n", encoding="utf-8")
@@ -3287,28 +4109,49 @@ def test_exit_packet_create_blocks_outdated_final_command_evidence() -> None:
         assert "command_result E2 final evidence predates current source changes" in payload["errors"][0]
 
 
+def test_final_command_evidence_requires_audit_fields() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        slug, _goal, _evidence = prepare_goal(root, "s", "final-command-schema")
+        result = run(
+            [
+                "--project-root",
+                str(root),
+                "evidence-add",
+                "--session-id",
+                "s",
+                "--goal-slug",
+                slug,
+                "--type",
+                "command_result",
+                "--summary",
+                "minimal final command",
+                "--supports",
+                "A1",
+                "--artifact-json",
+                compact_json({"type": "command_result", "name": "test evidence", "command": "pytest", "exit_code": 0, "validity_scope": "final"}),
+            ],
+            check=False,
+        )
+        assert result.returncode == 2
+        assert "final evidence requires non-empty artifact-json.argv" in json.loads(result.stdout)["errors"][0]
+
+
 def test_exit_packet_create_blocks_missing_final_scoped_evidence() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        run(["--project-root", str(root), "init", "--session-id", "s"])
-        run(["--project-root", str(root), "goal-start", "--session-id", "s", "--slug", "missing-final-evidence", "--title", "missing-final-evidence", "--user-goal", "missing-final-evidence"])
-        slug, _goal = goal_dir(root, "s", "missing-final-evidence")
-        command = stage_contract_args(root, "s", slug)
-        command[command.index("--acceptance-json") + 1] = compact_json(
-            [
-                {
-                    "id": "A1",
-                    "requirement": "Final release gate passes",
-                    "observable_outcome": "Final-scoped release gate command exits 0",
-                    "evidence_required": [{"type": "command_result", "name": "release gate", "exit_code": 0, "validity_scope": "final"}],
-                    "verifier": [{"type": "command_result", "name": "release gate"}, {"type": "mobiuscv_exit"}],
-                    "review_focus": ["final release gate is current"],
-                    "required": True,
-                }
-            ]
+        slug, goal, _evidence = prepare_goal(root, "s", "missing-final-evidence")
+        start_stage(root, "s", slug)
+        delta_packet = create_packet(root, "s", slug, "delta_review", ["A1"])
+        mobius.record_cv_result(
+            root,
+            "s",
+            slug,
+            delta_cv_envelope("cv_delta_001", read_goal_id(goal), packet_id=str(delta_packet["packet"])),
+            "delta_review",
+            target_plan_item_id="P1",
+            target_acceptance_ids=["A1"],
         )
-        run(command)
-        run(["--project-root", str(root), "contract-lock", "--session-id", "s", "--goal-slug", slug])
         result = run(
             ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"],
             check=False,
@@ -3316,7 +4159,7 @@ def test_exit_packet_create_blocks_missing_final_scoped_evidence() -> None:
         payload = json.loads(result.stdout)
         assert result.returncode == 2
         assert payload["next_required_action"] == "refresh_final_evidence"
-        assert "acceptance A1 is missing final-scoped evidence" in payload["errors"][0]
+        assert "acceptance A1 is missing final-scoped command_result evidence" in payload["errors"][0]
 
 
 def test_generated_python_artifacts_are_cheap_exit_diagnostics() -> None:
@@ -3326,6 +4169,7 @@ def test_generated_python_artifacts_are_cheap_exit_diagnostics() -> None:
         pycache.mkdir(parents=True)
         (pycache / "mobius.cpython-312.pyc").write_bytes(b"bytecode")
         slug, _goal, _evidence = prepare_goal(root, "s", "generated-artifact")
+        ensure_exit_ready(root, "s", slug)
         result = run(
             ["--project-root", str(root), "packet-create", "--session-id", "s", "--goal-slug", slug, "--review-mode", "exit_review"],
             check=False,
@@ -3381,7 +4225,9 @@ def test_pre_tool_hook_blocks_state_writes_and_allows_reads() -> None:
         assert run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=read, check=False).returncode == 0
 
         sed_read = json.dumps({"tool_input": {"command": f"sed -n 1p {goal / 'plan.csv'}"}})
-        assert run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=sed_read, check=False).returncode == 0
+        result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=sed_read, check=False)
+        assert result.returncode == 2
+        assert "plan.csv is protected state" in result.stderr
 
         ignore_read = json.dumps({"tool_input": {"command": f"git check-ignore {goal / 'plan.csv'}"}})
         assert run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=ignore_read, check=False).returncode == 0
@@ -3406,6 +4252,77 @@ def test_pre_tool_hook_blocks_state_writes_and_allows_reads() -> None:
         assert result.returncode == 2
         assert "acceptance.csv is protected state" in result.stderr
 
+        for command, expected in (
+            (f"cat /dev/null > {goal / 'plan.cs?'}", "plan.cs? is protected state"),
+            (f"cat /dev/null > {goal / '*.csv'}", "*.csv is protected state"),
+            (f"cat /dev/null > {goal / 'review_attempts.cs?'}", "review_attempts.cs? is protected state"),
+            (f"cat /dev/null >{goal / 'plan.cs?'}", "plan.cs? is protected state"),
+            (f"cat /dev/null > {goal / 'plan.{csv,txt}'}", "plan.{csv,txt} is protected state"),
+            (f"cat /dev/null > {goal / '{plan.csv,notes.txt}'}", "{plan.csv,notes.txt} is protected state"),
+            (f"cat /dev/null > {root / '.mobius' / 'runs' / 'codex-session-*' / 'hook-state' / 'plan.csv'}", "plan.csv is protected state"),
+            (f"cat /dev/null > {root / '.mobius' / 'runs' / 'codex-session-s' / '*' / 'plan.csv'}", "plan.csv is protected state"),
+        ):
+            payload = json.dumps({"tool_input": {"command": command}})
+            result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=payload, check=False)
+            assert result.returncode == 2
+            assert expected in result.stderr
+
+        for command in (
+            f"cat /dev/null > {root / '.mobius' / 'scratch' / 'plan.csv'}",
+            f"cat /dev/null > {root / '.mobius' / 'notes' / 'evidence.csv'}",
+            f"cat /dev/null > {root / '.mobius' / 'runs' / 'not-a-codex-session' / 'goal' / 'plan.csv'}",
+        ):
+            payload = json.dumps({"tool_input": {"command": command}})
+            assert run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=payload, check=False).returncode == 0
+
+
+def test_pre_tool_hook_allows_restricted_read_pipelines() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _slug, goal, _evidence = prepare_goal(root, "s", "hook-read-pipe")
+        allowed = json.dumps({"tool_input": {"command": f"cat {goal / 'plan.csv'} | sort | uniq | wc -l"}})
+        assert run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=allowed, check=False).returncode == 0
+
+        repeated_protected_read = json.dumps({"tool_input": {"command": f"cat {goal / 'plan.csv'} | cat {goal / 'acceptance.csv'}"}})
+        result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=repeated_protected_read, check=False)
+        assert result.returncode == 2
+        assert "plan.csv is protected state" in result.stderr or "acceptance.csv is protected state" in result.stderr
+
+        sed_write = json.dumps({"tool_input": {"command": f"sed 'w {goal / 'acceptance.csv'}' {goal / 'plan.csv'}"}})
+        result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=sed_write, check=False)
+        assert result.returncode == 2
+        assert "plan.csv is protected state" in result.stderr or "acceptance.csv is protected state" in result.stderr
+
+        filter_write = json.dumps({"tool_input": {"command": f"cat {goal / 'plan.csv'} | sort -o {goal / 'plan.csv'}"}})
+        result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=filter_write, check=False)
+        assert result.returncode == 2
+        assert "plan.csv is protected state" in result.stderr
+
+        outside_filter_write = json.dumps({"tool_input": {"command": f"cat {goal / 'plan.csv'} | sort -o /tmp/mobius-hook-review-out"}})
+        result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=outside_filter_write, check=False)
+        assert result.returncode == 2
+        assert "plan.csv is protected state" in result.stderr
+
+        filter_file_read = json.dumps({"tool_input": {"command": f"cat {goal / 'plan.csv'} | wc --files0-from=/tmp/mobius-hook-review-list"}})
+        result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=filter_file_read, check=False)
+        assert result.returncode == 2
+        assert "plan.csv is protected state" in result.stderr
+
+        filter_operand = json.dumps({"tool_input": {"command": f"cat {goal / 'plan.csv'} | sort /tmp/mobius-hook-review-in"}})
+        result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=filter_operand, check=False)
+        assert result.returncode == 2
+        assert "plan.csv is protected state" in result.stderr
+
+        unspaced_pipe_write = json.dumps({"tool_input": {"command": f"cat {goal / 'plan.csv'}|tee {goal / 'plan.csv'}"}})
+        result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=unspaced_pipe_write, check=False)
+        assert result.returncode == 2
+        assert "plan.csv is protected state" in result.stderr
+
+        unspaced_redirect_write = json.dumps({"tool_input": {"command": f"cat {goal / 'plan.csv'}> {goal / 'plan.csv'}"}})
+        result = run(["--project-root", str(root), "hook", "pre-tool-use"], input_text=unspaced_redirect_write, check=False)
+        assert result.returncode == 2
+        assert "plan.csv is protected state" in result.stderr
+
 
 def test_pre_tool_hook_does_not_scan_packet_create_commands() -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -3424,6 +4341,8 @@ def test_hook_config_dispatches_current_events() -> None:
         command = data["hooks"][hook_name][0]["hooks"][0]["command"]
         assert f'mobius-hook "${{PLUGIN_ROOT}}" hook {expected_action}' in command
         assert "mobius_hook_launcher.sh" in command
+        assert "scripts/mobius.py" not in command
+        assert "hook-corrupt-install" not in command
         env = os.environ.copy()
         env["PLUGIN_ROOT"] = str(ROOT)
         result = subprocess.run(command, input="{}", text=True, shell=True, executable="/bin/bash", capture_output=True, env=env, check=False)
@@ -3434,6 +4353,12 @@ def test_hook_config_dispatches_current_events() -> None:
         missing_root = subprocess.run(command, input="{}", text=True, shell=True, executable="/bin/bash", capture_output=True, env=missing_root_env, check=False)
         assert missing_root.returncode == 2
         assert "PLUGIN_ROOT missing" in missing_root.stderr
+        with tempfile.TemporaryDirectory() as stale_tmp:
+            stale_env = dict(env)
+            stale_env["PLUGIN_ROOT"] = str(Path(stale_tmp) / ".codex" / "plugins" / "cache" / "mobius" / "mobius" / "0.4.0")
+            stale_cache = subprocess.run(command, input="{}", text=True, shell=True, executable="/bin/bash", capture_output=True, env=stale_env, check=False)
+            assert stale_cache.returncode == 0
+            assert "hook-unavailable: installed plugin cache missing" in stale_cache.stderr
 
     with tempfile.TemporaryDirectory() as tmp:
         corrupt_root = Path(tmp)
@@ -3460,6 +4385,42 @@ def test_hook_config_dispatches_current_events() -> None:
         )
         assert missing_python.returncode == 2
         assert "hook-runtime-missing: python3" in missing_python.stderr
+
+
+def test_doctor_reports_hook_mcp_and_platform_status() -> None:
+    result = run(["doctor"], check=False)
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "doctor"
+    assert payload["platform"]["status"] in {"supported", "unsupported"}
+    assert payload["hooks"]["status"] in {"active", "inactive", "stale_cache_path", "unsupported_platform"}
+    assert payload["mcp"]["uv_required"] is True
+    assert "trust_guidance" in payload["hooks"]
+    if payload["uv"]["available"]:
+        assert result.returncode == 0
+        assert payload["next_required_action"] == "continue_loop"
+        assert payload["mcp"]["self_check"]["status"] == "ready"
+    else:
+        assert result.returncode == 2
+        assert payload["next_required_action"] == "repair_plugin_install"
+        assert any("uv is not on PATH" in error for error in payload["errors"])
+
+    false_env = os.environ.copy()
+    false_env["MOBIUS_CV_UV"] = "/bin/false"
+    false_doctor = subprocess.run([sys.executable, str(MOBIUS), "doctor"], text=True, capture_output=True, env=false_env, check=False)
+    false_payload = json.loads(false_doctor.stdout)
+    assert false_doctor.returncode == 2
+    assert false_payload["mcp"]["start_ready"] is False
+    assert false_payload["mcp"]["self_check"]["status"] == "failed"
+    assert any("MobiusCV MCP self-check failed" in error for error in false_payload["errors"])
+
+    with tempfile.TemporaryDirectory() as stale_tmp:
+        env = os.environ.copy()
+        env["MOBIUS_PLUGIN_ROOT"] = str(Path(stale_tmp) / ".codex" / "plugins" / "cache" / "mobius" / "mobius" / "0.4.0")
+        stale = subprocess.run([sys.executable, str(MOBIUS), "doctor"], text=True, capture_output=True, env=env, check=False)
+        stale_payload = json.loads(stale.stdout)
+        assert stale.returncode == 2
+        assert stale_payload["run_location"] == "stale_cache_path"
+        assert stale_payload["hooks"]["status"] == "stale_cache_path"
 
 
 def test_public_docs_skills_and_verify_surface() -> None:

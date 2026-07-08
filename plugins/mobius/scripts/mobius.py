@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fnmatch
 import hashlib
 import io
 import json
@@ -12,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -20,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 
-MOBIUS_VERSION = "0.3.0"
+MOBIUS_VERSION = "0.4.0"
 ACCEPTANCE_RULE = "accepted iff every required plan and acceptance row is locked, and every required acceptance item is pass and backed by a stateless non-degraded MobiusCV MCP exit_review"
 
 RUN_FIELDS = ["schema", "run_id", "codex_session_id", "project_root", "created_at", "mobius_version", "codex_json", "goals_json"]
@@ -98,6 +100,9 @@ ACCEPTANCE_FIELDS = [
     "cv_id",
     "verified_by",
     "verified_at",
+    "delta_status",
+    "delta_cv_id",
+    "delta_verified_at",
     *LOCK_FIELDS,
 ]
 EVIDENCE_FIELDS = ["schema", "id", "goal_id", "type", "summary", "supports_json", "artifact_json", "created_by", "created_at"]
@@ -167,6 +172,7 @@ LOOP_FIELDS = [
     "updated_at",
 ]
 LOOP_STATUSES = {"pending", "running", "passed", "blocked"}
+DELTA_ACCEPTANCE_STATUSES = {"", "pass", "fail", "unknown", "blocked"}
 PUBLIC_LOOP_START_STATUSES = {"running"}
 PLAN_STATUSES = {"pending", "superseded"}
 ACCEPTANCE_STATUSES = {"unknown", "pass", "blocked", "superseded"}
@@ -186,12 +192,32 @@ STRUCTURED_PROOF_TYPES = EVIDENCE_TYPES - {"human_assertion"}
 PATH_PROOF_TYPES = {"file_ref"}
 CHANGE_SET_SCOPE_COVERAGE = {"tracked", "staged", "untracked", "intent_to_add"}
 EVIDENCE_VALIDITY_SCOPES = {"stage", "final", "historical"}
+FINAL_SCOPED_EVIDENCE_TYPES = {"change_set_scope", "file_ref", "command_result", "test_result"}
+PROTECTED_LEDGER_FILENAMES = (
+    "run.csv",
+    "goal.csv",
+    "plan.csv",
+    "acceptance.csv",
+    "evidence.csv",
+    "packets.csv",
+    "cv.csv",
+    "loop.csv",
+    "review_attempts.csv",
+    "verdict.csv",
+)
 LOOP_STOP_REASONS = {"review_blocked", "repair_budget_exhausted", "contract_change_required", "no_runnable_action"}
 EXIT_BLOCKER_KINDS = {"repairable_blocked", "contract_change_required", "infra_blocked", "terminal_blocked"}
+HIGH_RISK_REVIEW_FOCUS_PATTERN = re.compile(
+    r"\b(goodhart|proxy|absence|pruning|security|architecture boundary|no hidden|hidden behavior)\b",
+    re.IGNORECASE,
+)
 
 REPAIRABLE_EXIT_BLOCKER_PATTERN = re.compile(
-    r"stale|hash mismatch|generated runtime|__pycache__|[.]pyc\b|packet refs|packet/evidence|"
-    r"missing final|refresh final|verify[.]sh fails|file_ref|evidence.*stale",
+    r"file_ref\s+\S+\s+(?:is stale:|is not current final evidence:)|"
+    r"(?:command_result|test_result)\s+\S+\s+final evidence (?:predates current source changes|is missing recorded_at|has invalid recorded_at)|"
+    r"acceptance\s+\S+\s+is missing final-scoped (?:change_set_scope|file_ref|command_result|test_result) evidence|"
+    r"generated runtime artifact in plugin source tree:|"
+    r"packet refs(?: mismatch|[.]\S+\s)",
     re.IGNORECASE,
 )
 TERMINAL_EXIT_BLOCKER_PATTERN = re.compile(
@@ -210,8 +236,8 @@ STATE_TRANSITIONS = {
     "loop": {
         "pending": {"running"},
         "running": {"passed", "blocked"},
-        "blocked": {"running"},
-        "passed": {"running"},
+        "blocked": set(),
+        "passed": set(),
     },
     "acceptance": {
         "unknown": {"pass", "blocked", "superseded"},
@@ -668,6 +694,7 @@ def artifact_json_record(root: Path, artifact_json: str, evidence_type: str) -> 
         parsed["validity_scope"] = validity_scope
     if parsed.get("path") and effective_type not in PATH_PROOF_TYPES:
         raise MobiusError(f"artifact-json path refs are only allowed for evidence types: {sorted_join(PATH_PROOF_TYPES)}")
+    validity_scope = str(parsed.get("validity_scope", "")).strip()
     if parsed.get("path"):
         path_record = artifact_record(root, str(parsed["path"]), str(parsed.get("purpose", "")))
         merged = {**parsed, **path_record}
@@ -681,6 +708,8 @@ def artifact_json_record(root: Path, artifact_json: str, evidence_type: str) -> 
         return merged
     if evidence_type in {"command_result", "test_result"} and not str(parsed.get("command", "")).strip():
         raise MobiusError(f"{evidence_type} evidence requires artifact-json.command")
+    if evidence_type in {"command_result", "test_result"} and validity_scope == "final":
+        validate_final_command_artifact(parsed, evidence_type)
     if evidence_type == "change_set_scope":
         coverage = parsed.get("coverage")
         if not isinstance(coverage, dict):
@@ -717,10 +746,60 @@ def artifact_json_record(root: Path, artifact_json: str, evidence_type: str) -> 
     return parsed
 
 
-def evidence_refs_for_packet(goal_dir: Path, required_ids: list[str]) -> dict[str, list[str]]:
+def parse_iso_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def validate_final_command_artifact(parsed: dict[str, Any], evidence_type: str) -> None:
+    argv = parsed.get("argv")
+    if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item.strip() for item in argv):
+        raise MobiusError(f"{evidence_type} final evidence requires non-empty artifact-json.argv string array")
+    cwd = str(parsed.get("cwd", "")).strip()
+    if not cwd:
+        raise MobiusError(f"{evidence_type} final evidence requires artifact-json.cwd")
+    path_errors = root_relative_path_errors(f"{evidence_type}.cwd", [cwd])
+    if path_errors:
+        raise MobiusError("; ".join(path_errors))
+    for field in ("started_at", "finished_at"):
+        value = str(parsed.get(field, "")).strip()
+        if not value:
+            raise MobiusError(f"{evidence_type} final evidence requires artifact-json.{field}")
+        try:
+            parse_iso_datetime(value)
+        except ValueError as exc:
+            raise MobiusError(f"{evidence_type} final evidence artifact-json.{field} must be an ISO timestamp") from exc
+    duration = parsed.get("duration_ms")
+    if not isinstance(duration, int) or duration < 0:
+        raise MobiusError(f"{evidence_type} final evidence requires non-negative integer artifact-json.duration_ms")
+    output_refs = {
+        "stdout_ref",
+        "stderr_ref",
+        "log_ref",
+        "stdout_sha256",
+        "stderr_sha256",
+        "log_sha256",
+        "stdout_hash",
+        "stderr_hash",
+        "log_hash",
+    }
+    if not any(str(parsed.get(key, "")).strip() for key in output_refs):
+        raise MobiusError(f"{evidence_type} final evidence requires a stdout/stderr/log ref or hash")
+
+
+def evidence_refs_for_packet(goal_dir: Path, required_ids: list[str], review_mode: str = "delta_review") -> dict[str, list[str]]:
     required = {str(item) for item in required_ids}
     refs: dict[str, list[str]] = {}
-    for row in read_csv_rows(goal_dir / "evidence.csv"):
+    if review_mode == "exit_review":
+        selected, selection_errors = selected_final_evidence_by_acceptance(goal_dir, list(required))
+        if selection_errors:
+            raise MobiusError("; ".join(selection_errors))
+        rows = dedupe_evidence_rows([row for acceptance_rows in selected.values() for row in acceptance_rows])
+    else:
+        rows = read_csv_rows(goal_dir / "evidence.csv")
+    for row in rows:
         try:
             supports = from_json_cell(row.get("supports_json", ""), [])
         except json.JSONDecodeError as exc:
@@ -783,6 +862,154 @@ def evidence_rows_for_acceptance_ids(goal_dir: Path, acceptance_ids: list[str]) 
     return rows
 
 
+def evidence_validity_scope(row: dict[str, str]) -> str:
+    artifact = evidence_artifact(row)
+    scope = str(artifact.get("validity_scope", "")).strip()
+    return scope if scope else "stage"
+
+
+def row_supports_acceptance(row: dict[str, str], acceptance_id: str) -> bool:
+    try:
+        supports = from_json_cell(row.get("supports_json", ""), [])
+    except json.JSONDecodeError:
+        return False
+    return isinstance(supports, list) and acceptance_id in {str(item) for item in supports}
+
+
+def final_required_item(required: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(required)
+    normalized.pop("validity_scope", None)
+    return normalized
+
+
+def evidence_matches_final_required_item(evidence: dict[str, str], required: dict[str, Any]) -> bool:
+    if evidence_validity_scope(evidence) != "final":
+        return False
+    return evidence_matches_required_item(evidence, final_required_item(required))
+
+
+def dedupe_evidence_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, str]] = []
+    for row in rows:
+        evidence_id = row.get("id", "")
+        if evidence_id in seen:
+            continue
+        seen.add(evidence_id)
+        deduped.append(row)
+    return deduped
+
+
+def selected_final_evidence_by_acceptance(goal_dir: Path, acceptance_ids: list[str]) -> tuple[dict[str, list[dict[str, str]]], list[str]]:
+    evidence_rows = evidence_rows_for_acceptance_ids(goal_dir, acceptance_ids)
+    acceptance = active_acceptance_by_id(goal_dir)
+    selected: dict[str, list[dict[str, str]]] = {str(item): [] for item in acceptance_ids}
+    errors: list[str] = []
+    for acceptance_id in [str(item) for item in acceptance_ids]:
+        acceptance_row = acceptance.get(acceptance_id)
+        if acceptance_row is None:
+            errors.append(f"acceptance {acceptance_id} is not active required")
+            continue
+        for required in required_evidence_items(acceptance_row):
+            required_type = str(required.get("type", "")).strip()
+            candidates = [row for row in evidence_rows if row_supports_acceptance(row, acceptance_id)]
+            if required_type in FINAL_SCOPED_EVIDENCE_TYPES:
+                matches = [row for row in candidates if evidence_matches_final_required_item(row, required)]
+                if not matches:
+                    errors.append(
+                        f"acceptance {acceptance_id} is missing final-scoped {required_type} evidence; "
+                        "refresh final evidence"
+                    )
+                    continue
+            else:
+                matches = [row for row in candidates if evidence_matches_required_item(row, required)]
+                if not matches:
+                    errors.append(f"acceptance {acceptance_id} is missing {required_type or 'required'} evidence")
+                    continue
+            selected[acceptance_id].append(matches[-1])
+        selected[acceptance_id] = dedupe_evidence_rows(selected[acceptance_id])
+    return selected, errors
+
+
+def selected_final_evidence_rows(goal_dir: Path, acceptance_ids: list[str]) -> list[dict[str, str]]:
+    selected, _errors = selected_final_evidence_by_acceptance(goal_dir, acceptance_ids)
+    return dedupe_evidence_rows([row for rows in selected.values() for row in rows])
+
+
+def git_changed_paths(root: Path) -> tuple[list[str], list[str]]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain=v1", "-z"],
+            text=False,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        return [], [f"git status unavailable: {exc}"]
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        if "not a git repository" in stderr:
+            return [], ["git repository is required for change_set_scope preflight"]
+        return [], [f"git status failed: {stderr or result.returncode}"]
+    fields = result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        entry = fields[index]
+        index += 1
+        if not entry:
+            continue
+        status = entry[:2]
+        path_text = entry[3:] if len(entry) > 3 else ""
+        if status.startswith("R") or status.startswith("C"):
+            if index < len(fields):
+                old_path = fields[index]
+                index += 1
+                if old_path:
+                    paths.append(old_path)
+        if path_text:
+            paths.append(path_text)
+    return sorted(set(paths)), []
+
+
+def path_matches_patterns(path: str, patterns: list[str]) -> bool:
+    normalized = path.replace("\\", "/")
+    for pattern in patterns:
+        item = pattern.strip().replace("\\", "/")
+        if not item:
+            continue
+        if fnmatch.fnmatch(normalized, item) or fnmatch.fnmatch(normalized, item.rstrip("/") + "/**"):
+            return True
+        if normalized == item or normalized.startswith(item.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def change_set_scope_preflight_errors(goal_dir: Path, row: dict[str, str]) -> list[str]:
+    root = project_root_from_goal_dir(goal_dir)
+    evidence_id = row.get("id", "")
+    artifact = evidence_artifact(row)
+    paths = [str(item) for item in artifact.get("paths", []) if str(item).strip()]
+    forbidden = [str(item) for item in artifact.get("forbidden_paths", []) if str(item).strip()]
+    changed, git_errors = git_changed_paths(root)
+    errors = [f"change_set_scope {evidence_id}: {error}" for error in git_errors]
+    if not changed:
+        return errors
+    uncovered = [path for path in changed if not path_matches_patterns(path, paths)]
+    forbidden_hits = [path for path in changed if path_matches_patterns(path, forbidden)]
+    if uncovered:
+        errors.append(
+            f"change_set_scope {evidence_id} does not cover current changed paths: "
+            + ",".join(uncovered)
+        )
+    if forbidden_hits:
+        errors.append(
+            f"change_set_scope {evidence_id} current changed paths hit forbidden_paths: "
+            + ",".join(forbidden_hits)
+        )
+    return errors
+
+
 def final_evidence_preflight_errors(goal_dir: Path, acceptance_ids: list[str]) -> list[str]:
     root = project_root_from_goal_dir(goal_dir)
     errors: list[str] = []
@@ -792,7 +1019,10 @@ def final_evidence_preflight_errors(goal_dir: Path, acceptance_ids: list[str]) -
             + artifact
             + "; run Mobius Python entrypoints with PYTHONDONTWRITEBYTECODE=1 or PYTHONPYCACHEPREFIX outside plugins/mobius"
         )
-    for row in evidence_rows_for_acceptance_ids(goal_dir, acceptance_ids):
+    selected_by_acceptance, selection_errors = selected_final_evidence_by_acceptance(goal_dir, acceptance_ids)
+    errors.extend(selection_errors)
+    selected_rows = dedupe_evidence_rows([row for rows in selected_by_acceptance.values() for row in rows])
+    for row in selected_rows:
         if row.get("type") != "file_ref":
             continue
         evidence_id = row.get("id", "")
@@ -815,49 +1045,197 @@ def final_evidence_preflight_errors(goal_dir: Path, acceptance_ids: list[str]) -
                 f"file_ref {evidence_id} is stale: {rel_path} recorded {recorded_sha} but current {current_sha}; "
                 "refresh final evidence and create a new exit packet"
             )
-    evidence_rows = evidence_rows_for_acceptance_ids(goal_dir, acceptance_ids)
-    evidence_by_acceptance: dict[str, list[dict[str, str]]] = {}
-    for row in evidence_rows:
-        try:
-            supports = from_json_cell(row.get("supports_json", ""), [])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(supports, list):
-            for acceptance_id in supports:
-                evidence_by_acceptance.setdefault(str(acceptance_id), []).append(row)
-    acceptance = active_acceptance_by_id(goal_dir)
-    for acceptance_id in [str(item) for item in acceptance_ids]:
-        row = acceptance.get(acceptance_id, {})
-        for required in required_evidence_items(row):
-            if str(required.get("validity_scope", "")).strip() != "final":
-                continue
-            if not any(evidence_matches_required_item(evidence, required) for evidence in evidence_by_acceptance.get(acceptance_id, [])):
-                errors.append(f"acceptance {acceptance_id} is missing final-scoped evidence; refresh final evidence")
-
     source_mtime = latest_source_mtime(root)
-    for row in evidence_rows_for_acceptance_ids(goal_dir, acceptance_ids):
+    for row in selected_rows:
         if row.get("type") not in {"command_result", "test_result"}:
             continue
         evidence_id = row.get("id", "")
         artifact = evidence_artifact(row)
-        if artifact.get("validity_scope") != "final":
-            continue
-        recorded_at = str(artifact.get("recorded_at") or row.get("created_at", "")).strip()
+        recorded_at = str(artifact.get("finished_at") or artifact.get("recorded_at") or row.get("created_at", "")).strip()
         if not recorded_at:
             errors.append(f"{row.get('type')} {evidence_id} final evidence is missing recorded_at; refresh final evidence")
             continue
         try:
-            recorded_dt = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+            recorded_dt = parse_iso_datetime(recorded_at)
         except ValueError:
             errors.append(f"{row.get('type')} {evidence_id} final evidence has invalid recorded_at: {recorded_at}")
             continue
-        if recorded_dt.tzinfo is None:
-            recorded_dt = recorded_dt.replace(tzinfo=timezone.utc)
         if source_mtime and recorded_dt.timestamp() < source_mtime:
             errors.append(
                 f"{row.get('type')} {evidence_id} final evidence predates current source changes; "
                 "rerun the command and create a new exit packet"
             )
+    return errors
+
+
+def delta_evidence_preflight_errors(goal_dir: Path, acceptance_ids: list[str]) -> list[str]:
+    root = project_root_from_goal_dir(goal_dir)
+    errors: list[str] = []
+    source_mtime = latest_source_mtime(root)
+    for row in evidence_rows_for_acceptance_ids(goal_dir, acceptance_ids):
+        scope = evidence_validity_scope(row)
+        if scope == "historical":
+            continue
+        currentness = evidence_currentness(root, row, source_mtime)
+        status = str(currentness.get("status", ""))
+        if row.get("type") == "file_ref" and status != "current":
+            errors.append(f"file_ref {row.get('id', '')} is not current stage evidence: {currentness.get('reason', status)}")
+        if row.get("type") in {"command_result", "test_result"} and scope == "final" and status != "current":
+            errors.append(f"{row.get('type')} {row.get('id', '')} final evidence is not current: {currentness.get('reason', status)}")
+        if row.get("type") == "change_set_scope":
+            errors.extend(change_set_scope_preflight_errors(goal_dir, row))
+    return errors
+
+
+def evidence_currentness(root: Path, row: dict[str, str], source_mtime: float | None = None) -> dict[str, Any]:
+    evidence_id = row.get("id", "")
+    evidence_type = row.get("type", "")
+    artifact = evidence_artifact(row)
+    scope = evidence_validity_scope(row)
+    if evidence_type == "file_ref":
+        rel_path = str(artifact.get("path", "")).strip()
+        recorded_sha = str(artifact.get("sha256", "")).strip()
+        if not rel_path or not recorded_sha:
+            return {"status": "invalid", "reason": "file_ref missing path or sha256"}
+        path_errors = root_relative_path_errors(f"evidence.csv:{evidence_id}:path", [rel_path])
+        if path_errors:
+            return {"status": "invalid", "reason": "; ".join(path_errors), "path": rel_path}
+        current_path = root / rel_path
+        if not current_path.is_file():
+            return {"status": "missing", "reason": f"{rel_path} is missing", "path": rel_path}
+        current_sha = sha256_file(current_path)
+        if current_sha != recorded_sha:
+            return {
+                "status": "stale",
+                "reason": f"{rel_path} recorded {recorded_sha} but current {current_sha}",
+                "path": rel_path,
+                "recorded_sha256": recorded_sha,
+                "current_sha256": current_sha,
+            }
+        return {"status": "current", "path": rel_path, "sha256": recorded_sha}
+    if evidence_type in {"command_result", "test_result"} and scope == "final":
+        source_mtime = latest_source_mtime(root) if source_mtime is None else source_mtime
+        recorded_at = str(artifact.get("finished_at") or artifact.get("recorded_at") or row.get("created_at", "")).strip()
+        if not recorded_at:
+            return {"status": "invalid", "reason": "final command/test evidence missing finished_at or recorded_at"}
+        try:
+            recorded_dt = parse_iso_datetime(recorded_at)
+        except ValueError:
+            return {"status": "invalid", "reason": f"invalid timestamp {recorded_at}"}
+        if source_mtime and recorded_dt.timestamp() < source_mtime:
+            return {"status": "stale", "reason": "final command/test evidence predates current source changes"}
+        return {"status": "current", "recorded_at": recorded_at}
+    return {"status": "not_applicable"}
+
+
+def evidence_listing(goal_dir: Path, acceptance_id: str = "", currentness: str = "all") -> list[dict[str, Any]]:
+    root = project_root_from_goal_dir(goal_dir)
+    source_mtime = latest_source_mtime(root)
+    listed: list[dict[str, Any]] = []
+    for row in read_csv_rows(goal_dir / "evidence.csv"):
+        try:
+            supports = from_json_cell(row.get("supports_json", ""), [])
+        except json.JSONDecodeError:
+            supports = []
+        supports_list = [str(item) for item in supports] if isinstance(supports, list) else []
+        if acceptance_id and acceptance_id not in supports_list:
+            continue
+        artifact = evidence_artifact(row)
+        state = evidence_currentness(root, row, source_mtime)
+        if currentness != "all" and state.get("status") != currentness:
+            continue
+        listed.append(
+            {
+                "id": row.get("id", ""),
+                "supports": supports_list,
+                "type": row.get("type", ""),
+                "summary": row.get("summary", ""),
+                "validity_scope": evidence_validity_scope(row),
+                "path": str(artifact.get("path", "")),
+                "name": str(artifact.get("name", "")),
+                "command": str(artifact.get("command", "")),
+                "currentness": state,
+                "created_at": row.get("created_at", ""),
+            }
+        )
+    return listed
+
+
+def final_evidence_refresh_templates(goal_dir: Path, acceptance_ids: list[str]) -> list[dict[str, Any]]:
+    templates: list[dict[str, Any]] = []
+    acceptance = active_acceptance_by_id(goal_dir)
+    for acceptance_id in [str(item) for item in acceptance_ids]:
+        row = acceptance.get(acceptance_id, {})
+        for required in required_evidence_items(row):
+            required_type = str(required.get("type", "")).strip()
+            if required_type not in FINAL_SCOPED_EVIDENCE_TYPES:
+                continue
+            artifact_template: dict[str, Any]
+            if required_type == "file_ref":
+                artifact_template = {"type": "file_ref", "path": "<project-root-relative-file>", "validity_scope": "final"}
+            elif required_type in {"command_result", "test_result"}:
+                artifact_template = {
+                    "type": required_type,
+                    "name": str(required.get("name", "<proof name>")),
+                    "command": "<command>",
+                    "argv": ["<command>"],
+                    "cwd": ".",
+                    "exit_code": required.get("exit_code", 0),
+                    "started_at": "<ISO-8601>",
+                    "finished_at": "<ISO-8601>",
+                    "duration_ms": 0,
+                    "log_sha256": "<sha256:...>",
+                    "validity_scope": "final",
+                }
+            else:
+                artifact_template = {
+                    "type": "change_set_scope",
+                    "paths": ["<path>"],
+                    "allowed_change_classes": ["<class>"],
+                    "forbidden_paths": [".mobius/**"],
+                    "coverage": {"tracked": True, "staged": True, "untracked": True, "intent_to_add": True},
+                    "validity_scope": "final",
+                }
+            templates.append(
+                {
+                    "acceptance_id": acceptance_id,
+                    "evidence_type": required_type,
+                    "argv_prefix": [
+                        "evidence-add",
+                        "--goal-slug",
+                        goal_dir.name,
+                        "--type",
+                        required_type,
+                        "--summary",
+                        f"final {required_type} evidence for {acceptance_id}",
+                        "--supports",
+                        acceptance_id,
+                        "--artifact-json",
+                        json.dumps(artifact_template, separators=(",", ":")),
+                    ],
+                }
+            )
+    return templates
+
+
+def final_evidence_diagnostics(goal_dir: Path, acceptance_ids: list[str]) -> dict[str, Any]:
+    errors = final_evidence_preflight_errors(goal_dir, acceptance_ids)
+    return {
+        "errors": errors,
+        "refresh_templates": final_evidence_refresh_templates(goal_dir, acceptance_ids),
+        "evidence": evidence_listing(goal_dir),
+    }
+
+
+def exit_stage_preflight_errors(goal_dir: Path) -> list[str]:
+    rows = sync_loop_with_plan(goal_dir, commit=False)
+    by_plan = {row.get("plan_item_id", ""): row for row in rows}
+    errors: list[str] = []
+    for plan in active_required_plan_items(goal_dir):
+        plan_id = plan.get("id", "")
+        status = by_plan.get(plan_id, {}).get("status", "pending")
+        if status != "passed":
+            errors.append(f"exit_review requires required stage {plan_id} to be passed; current status is {status or 'pending'}")
     return errors
 
 
@@ -900,7 +1278,13 @@ def exit_blocker_kind(result: dict[str, Any], comparison: dict[str, Any] | None 
 
 def repair_action_for_exit_blocker(kind: str, result: dict[str, Any]) -> str:
     if kind in {"repairable_blocked", "infra_blocked"}:
-        findings = " ".join(str(item) for item in result.get("blocking_findings", []) or [])
+        findings = " ".join(
+            str(item)
+            for item in [
+                *(result.get("blocking_findings", []) or []),
+                *(result.get("required_revisions", []) or []),
+            ]
+        )
         if REPAIRABLE_EXIT_BLOCKER_PATTERN.search(findings):
             return "refresh_final_evidence"
         if result.get("unchecked_acceptance_ids"):
@@ -1163,7 +1547,6 @@ def local_contract_default_cells(plan_id: str) -> dict[str, str]:
             "escalation_rule": "surface blocker to user",
         },
         "budget-json": {
-            "retry_limit": 2,
             "max_stage_attempts": 3,
             "stop_condition": "recorded review blocks or passes",
         },
@@ -1288,6 +1671,9 @@ def normalize_acceptance_contracts(
             "cv_id": "",
             "verified_by": "",
             "verified_at": "",
+            "delta_status": "",
+            "delta_cv_id": "",
+            "delta_verified_at": "",
             "locked": "",
             "locked_at": "",
             "locked_by": "",
@@ -1732,6 +2118,33 @@ def cmd_evidence_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evidence_list(args: argparse.Namespace) -> int:
+    root = project_root(args)
+    goal_dir = load_goal_dir(root, args.session_id, args.goal_slug)
+    errors = validate_contract_dir(goal_dir)
+    if errors:
+        json_print(command_contract_error("evidence-list", goal_dir, errors))
+        return 2
+    acceptance_id = args.acceptance_id or ""
+    if acceptance_id and acceptance_id not in active_acceptance_by_id(goal_dir):
+        json_print(command_result("evidence-list", ok=False, goal_dir=goal_dir, errors=[f"unknown active acceptance id: {acceptance_id}"]))
+        return 2
+    rows = evidence_listing(goal_dir, acceptance_id, args.currentness)
+    required_ids = [acceptance_id] if acceptance_id else active_required_acceptance_ids(goal_dir)
+    json_print(
+        command_result(
+            "evidence-list",
+            goal_dir=goal_dir,
+            next_required_action="refresh_final_evidence" if final_evidence_preflight_errors(goal_dir, required_ids) else "continue_loop",
+            data={
+                "evidence": rows,
+                "final_evidence": final_evidence_diagnostics(goal_dir, required_ids),
+            },
+        )
+    )
+    return 0
+
+
 def cmd_contract_lock(args: argparse.Namespace) -> int:
     root = project_root(args)
     goal_dir = load_goal_dir(root, args.session_id, args.goal_slug)
@@ -2085,6 +2498,12 @@ def validate_contract_dir(goal_dir: Path, *, require_complete: bool = True) -> l
                 errors.append(f"{path.name}:{row_id}: invalid contract_status: {row.get('contract_status', '')}")
             if filename == "acceptance.csv" and row.get("status") not in ACCEPTANCE_STATUSES:
                 errors.append(f"{path.name}:{row_id}: invalid status: {row.get('status', '')}")
+            if filename == "acceptance.csv" and row.get("delta_status", "") not in DELTA_ACCEPTANCE_STATUSES:
+                errors.append(f"{path.name}:{row_id}: invalid delta_status: {row.get('delta_status', '')}")
+            if filename == "acceptance.csv" and row.get("delta_status", "") and not row.get("delta_cv_id", ""):
+                errors.append(f"{path.name}:{row_id}: delta_cv_id is required when delta_status is set")
+            if filename == "acceptance.csv" and row.get("delta_status", "") and not row.get("delta_verified_at", ""):
+                errors.append(f"{path.name}:{row_id}: delta_verified_at is required when delta_status is set")
             for field in json_fields:
                 validate_json_cell(errors, path, row_id, row, field, [])
             if filename == "plan.csv":
@@ -2208,8 +2627,11 @@ def validate_contract_dir(goal_dir: Path, *, require_complete: bool = True) -> l
                     errors.append(f"plan.csv:{plan_id}: recovery_json requires restart_rule")
                 if not object_has_non_empty(recovery, "escalation_rule"):
                     errors.append(f"plan.csv:{plan_id}: recovery_json requires escalation_rule")
-                if not object_has_non_empty(budget, "retry_limit", "max_stage_attempts"):
-                    errors.append(f"plan.csv:{plan_id}: budget_json requires retry_limit or max_stage_attempts")
+                has_max_attempts = "max_stage_attempts" in budget and non_empty_value(budget.get("max_stage_attempts"))
+                if "retry_limit" in budget:
+                    errors.append(f"plan.csv:{plan_id}: budget_json contains unsupported key: retry_limit; use max_stage_attempts")
+                if not has_max_attempts:
+                    errors.append(f"plan.csv:{plan_id}: budget_json requires max_stage_attempts")
                 if not object_has_non_empty(budget, "stop_condition"):
                     errors.append(f"plan.csv:{plan_id}: budget_json requires stop_condition")
     cycle = detect_dependency_cycle(dependency_graph)
@@ -2284,8 +2706,74 @@ def validate_contract_dir(goal_dir: Path, *, require_complete: bool = True) -> l
             if safe_int(row.get("attempt"), -1) < 0:
                 errors.append(f"loop.csv:{plan_item_id}: attempt must be a non-negative integer")
             validate_json_cell(errors, loop_path, plan_item_id, row, "blocking_findings_json", [])
+    review_attempt_path = goal_dir / "review_attempts.csv"
+    if review_attempt_path.exists():
+        with review_attempt_path.open("r", encoding="utf-8", newline="") as handle:
+            header = csv.DictReader(handle).fieldnames or []
+        missing = [field for field in REVIEW_ATTEMPT_FIELDS if field not in header]
+        if missing:
+            errors.append(f"{review_attempt_path}: missing columns: {','.join(missing)}")
+        packet_by_id = {row.get("packet_id", ""): row for row in read_csv_rows(goal_dir / "packets.csv")}
+        cv_by_id = {row.get("cv_id", ""): row for row in read_csv_rows(goal_dir / "cv.csv")}
+        seen_attempts: set[str] = set()
+        attempt_counts_by_packet_mode: dict[tuple[str, str], int] = {}
+        for row in read_csv_rows(review_attempt_path):
+            attempt_id = row.get("attempt_id", "") or "line"
+            if row.get("schema") != "mobius.review_attempt":
+                errors.append(f"review_attempts.csv:{attempt_id}: unsupported schema: {row.get('schema', '')}; expected mobius.review_attempt")
+            if not row.get("attempt_id"):
+                errors.append("review_attempts.csv:line: missing attempt_id")
+            elif row["attempt_id"] in seen_attempts:
+                errors.append(f"review_attempts.csv:{attempt_id}: duplicate attempt_id")
+            seen_attempts.add(row.get("attempt_id", ""))
+            status = row.get("status", "")
+            if status not in REVIEW_ATTEMPT_STATUSES:
+                errors.append(f"review_attempts.csv:{attempt_id}: invalid status: {status}")
+            packet = packet_by_id.get(row.get("packet_id", ""))
+            if packet is None:
+                errors.append(f"review_attempts.csv:{attempt_id}: packet_id does not exist: {row.get('packet_id', '')}")
+            elif row.get("review_mode", "") != packet.get("review_mode", ""):
+                errors.append(f"review_attempts.csv:{attempt_id}: review_mode does not match packet")
+            retry_count = safe_int(row.get("retry_count"), -1)
+            if retry_count < 0:
+                errors.append(f"review_attempts.csv:{attempt_id}: retry_count must be a non-negative integer")
+            else:
+                attempt_key = (row.get("packet_id", ""), row.get("review_mode", ""))
+                expected_retry_count = attempt_counts_by_packet_mode.get(attempt_key, 0)
+                if retry_count != expected_retry_count:
+                    errors.append(
+                        f"review_attempts.csv:{attempt_id}: retry_count must be {expected_retry_count} "
+                        f"for packet_id/review_mode sequence"
+                    )
+                attempt_counts_by_packet_mode[attempt_key] = expected_retry_count + 1
+            if status == "started":
+                if row.get("finished_at"):
+                    errors.append(f"review_attempts.csv:{attempt_id}: started attempt must not have finished_at")
+            else:
+                if not row.get("finished_at"):
+                    errors.append(f"review_attempts.csv:{attempt_id}: finished_at is required when status is {status}")
+            if status == "recorded":
+                cv = cv_by_id.get(row.get("reviewer_summary_ref", ""))
+                if cv is None:
+                    errors.append(f"review_attempts.csv:{attempt_id}: recorded attempt must reference an existing cv_id")
+                else:
+                    if cv.get("packet_id", "") != row.get("packet_id", ""):
+                        errors.append(f"review_attempts.csv:{attempt_id}: recorded cv_id packet_id mismatch")
+                    if cv.get("review_mode", "") != row.get("review_mode", ""):
+                        errors.append(f"review_attempts.csv:{attempt_id}: recorded cv_id review_mode mismatch")
+            if status == "failed":
+                if not row.get("failure_kind", ""):
+                    errors.append(f"review_attempts.csv:{attempt_id}: failed attempt requires failure_kind")
+                if row.get("retryable", "") not in {"true", "false"}:
+                    errors.append(f"review_attempts.csv:{attempt_id}: failed attempt retryable must be true or false")
+                if not row.get("diagnostic_ref", "").strip():
+                    errors.append(f"review_attempts.csv:{attempt_id}: failed attempt requires diagnostic_ref")
+            elif row.get("retryable", ""):
+                errors.append(f"review_attempts.csv:{attempt_id}: retryable is only valid for failed attempts")
     for evidence in read_csv_rows(goal_dir / "evidence.csv"):
         evidence_id = evidence.get("id", "") or "line"
+        if evidence.get("type", "") not in EVIDENCE_TYPES:
+            errors.append(f"evidence.csv:{evidence_id}: unsupported type: {evidence.get('type', '')}")
         supports = parse_json_for_validation(errors, goal_dir / "evidence.csv", evidence_id, evidence, "supports_json", [], list)
         try:
             artifact = from_json_cell(evidence.get("artifact_json", ""), None)
@@ -2295,6 +2783,15 @@ def validate_contract_dir(goal_dir: Path, *, require_complete: bool = True) -> l
         if artifact is not None and not isinstance(artifact, dict):
             errors.append(f"evidence.csv:{evidence_id}: artifact_json must be an object")
             artifact = None
+        if isinstance(artifact, dict):
+            scope = str(artifact.get("validity_scope", "")).strip()
+            if scope and scope not in EVIDENCE_VALIDITY_SCOPES:
+                errors.append(f"evidence.csv:{evidence_id}: artifact_json.validity_scope must be one of: {sorted_join(EVIDENCE_VALIDITY_SCOPES)}")
+            if evidence.get("type", "") in {"command_result", "test_result"} and scope == "final":
+                try:
+                    validate_final_command_artifact(artifact, evidence.get("type", ""))
+                except MobiusError as exc:
+                    errors.append(f"evidence.csv:{evidence_id}: {exc}")
         for acceptance_id in [str(item) for item in supports]:
             if acceptance_id not in acceptance_ids:
                 errors.append(f"evidence.csv:{evidence_id}: supports_json references unknown acceptance id: {acceptance_id}")
@@ -2458,8 +2955,8 @@ def packet_envelope(
     scope: str,
     required_ids: list[str],
 ) -> dict[str, Any]:
-    support = supporting_evidence_by_acceptance(goal_dir)
-    refs = evidence_refs_for_packet(goal_dir, required_ids)
+    support = supporting_evidence_by_acceptance(goal_dir, review_mode)
+    refs = evidence_refs_for_packet(goal_dir, required_ids, review_mode)
     coverage = {acceptance_id: support.get(acceptance_id, []) for acceptance_id in required_ids}
     goal = read_single_csv(goal_dir / "goal.csv") or {}
     try:
@@ -2549,10 +3046,7 @@ def cmd_packet_create(args: argparse.Namespace) -> int:
                 )
             )
             return 2
-    goal = read_single_csv(goal_dir / "goal.csv") or {}
-    scope = target_plan_item_id if args.review_mode == "delta_review" else "all"
-    if args.review_mode == "exit_review":
-        preflight_errors = final_evidence_preflight_errors(goal_dir, required_ids)
+        preflight_errors = delta_evidence_preflight_errors(goal_dir, required_ids)
         if preflight_errors:
             json_print(
                 command_result(
@@ -2560,7 +3054,23 @@ def cmd_packet_create(args: argparse.Namespace) -> int:
                     ok=False,
                     goal_dir=goal_dir,
                     errors=preflight_errors,
-                    next_required_action="refresh_final_evidence",
+                    next_required_action="record_missing_evidence",
+                )
+            )
+            return 2
+    goal = read_single_csv(goal_dir / "goal.csv") or {}
+    scope = target_plan_item_id if args.review_mode == "delta_review" else "all"
+    if args.review_mode == "exit_review":
+        preflight_errors = [*exit_stage_preflight_errors(goal_dir), *final_evidence_preflight_errors(goal_dir, required_ids)]
+        if preflight_errors:
+            action = "fix_loop_state" if any("requires required stage" in error for error in preflight_errors) else "refresh_final_evidence"
+            json_print(
+                command_result(
+                    "packet-create",
+                    ok=False,
+                    goal_dir=goal_dir,
+                    errors=preflight_errors,
+                    next_required_action=action,
                 )
             )
             return 2
@@ -2659,9 +3169,13 @@ def active_required_acceptance_rows(goal_dir: Path) -> list[dict[str, str]]:
     ]
 
 
-def supporting_evidence_by_acceptance(goal_dir: Path) -> dict[str, list[str]]:
+def supporting_evidence_by_acceptance(goal_dir: Path, review_mode: str = "delta_review") -> dict[str, list[str]]:
     support: dict[str, list[str]] = {}
-    for record in read_csv_rows(goal_dir / "evidence.csv"):
+    if review_mode == "exit_review":
+        rows = selected_final_evidence_rows(goal_dir, active_required_acceptance_ids(goal_dir))
+    else:
+        rows = read_csv_rows(goal_dir / "evidence.csv")
+    for record in rows:
         evidence_id = record.get("id", "")
         if not evidence_id:
             continue
@@ -2737,6 +3251,59 @@ def review_gate_policy(
         "require_no_degraded_reviewers": True,
         "require_all_completed_reviewers_pass": True,
     }
+
+
+def review_focus_requires_kimi(goal_dir: Path, plan_item_id: str, acceptance_ids: list[str]) -> bool:
+    text_parts: list[str] = []
+    plan = next((item for item in active_required_plan_items(goal_dir) if item.get("id") == plan_item_id), {})
+    try:
+        gate = from_json_cell(plan.get("gate_json", ""), {})
+    except json.JSONDecodeError:
+        gate = {}
+    if isinstance(gate, dict):
+        text_parts.append(json.dumps(gate.get("review_focus", []), ensure_ascii=False))
+    target = {str(item) for item in acceptance_ids}
+    for row in active_required_acceptance_rows(goal_dir):
+        if row.get("id", "") not in target:
+            continue
+        text_parts.append(row.get("requirement", ""))
+        text_parts.append(row.get("observable_outcome", ""))
+        text_parts.append(row.get("review_focus_json", ""))
+    return bool(HIGH_RISK_REVIEW_FOCUS_PATTERN.search("\n".join(text_parts)))
+
+
+def contract_lower_policy_reason(goal_dir: Path, plan_item_id: str) -> str:
+    plan = next((item for item in active_required_plan_items(goal_dir) if item.get("id") == plan_item_id), {})
+    try:
+        gate = from_json_cell(plan.get("gate_json", ""), {})
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(gate, dict):
+        return ""
+    policy = gate.get("review_policy") or gate.get("review_gate_policy")
+    if not isinstance(policy, dict):
+        return ""
+    if str(policy.get("name", "")).strip() != "delta_light":
+        return ""
+    return str(policy.get("reason") or policy.get("lower_policy_reason") or "").strip()
+
+
+def review_policy_for_delta_targets(
+    goal_dir: Path,
+    plan_item_id: str,
+    acceptance_ids: list[str],
+    explicit_policy: Any | None = None,
+    *,
+    level: int | None = None,
+) -> dict[str, Any]:
+    plan = next((item for item in active_required_plan_items(goal_dir) if item.get("id") == plan_item_id), {})
+    try:
+        gate = from_json_cell(plan.get("gate_json", ""), {})
+    except json.JSONDecodeError:
+        gate = {}
+    if review_focus_requires_kimi(goal_dir, plan_item_id, acceptance_ids) and not contract_lower_policy_reason(goal_dir, plan_item_id):
+        return review_gate_policy("delta_review", {"name": "delta_kimi"}, gate)
+    return review_gate_policy("delta_review", explicit_policy or {"level": level or 1}, gate)
 
 
 def explicit_review_policy(cv_result: dict[str, Any]) -> dict[str, Any] | None:
@@ -2892,8 +3459,10 @@ def validate_cv_envelope(
     try:
         normalized_policy = review_gate_policy(str(cv_result.get("review_mode", "")), policy or {"level": level_int})
     except MobiusError as exc:
-        fallback_mode = str(cv_result.get("review_mode", ""))
-        normalized_policy = review_gate_policy(fallback_mode if fallback_mode in {"delta_review", "exit_review"} else "delta_review")
+        review_mode_for_error_context = str(cv_result.get("review_mode", ""))
+        normalized_policy = review_gate_policy(
+            review_mode_for_error_context if review_mode_for_error_context in {"delta_review", "exit_review"} else "delta_review"
+        )
         errors.append(str(exc))
     if policy is not None and policy != normalized_policy:
         errors.append("input_refs.review_policy is not canonical")
@@ -3025,7 +3594,7 @@ def validate_packet_for_goal(
     elif sorted(str(item) for item in coverage) != sorted(str(item) for item in expected_ids):
         errors.append("packet coverage acceptance ids mismatch")
     else:
-        support = supporting_evidence_by_acceptance(goal_dir)
+        support = supporting_evidence_by_acceptance(goal_dir, expected_review_mode)
         for acceptance_id in [str(item) for item in expected_ids]:
             value = coverage.get(acceptance_id)
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
@@ -3037,7 +3606,7 @@ def validate_packet_for_goal(
         errors.append("packet refs must be an object")
     else:
         try:
-            expected_refs = evidence_refs_for_packet(goal_dir, [str(item) for item in expected_ids])
+            expected_refs = evidence_refs_for_packet(goal_dir, [str(item) for item in expected_ids], expected_review_mode)
         except MobiusError as exc:
             errors.append(str(exc))
             expected_refs = {}
@@ -3056,7 +3625,10 @@ def validate_packet_for_goal(
             if not re.fullmatch(r"h:[0-9a-f]{7}", hash_ref):
                 errors.append(f"packet refs.{evidence_id} hash ref must be 7 hex chars")
     if expected_review_mode == "exit_review":
+        errors.extend(exit_stage_preflight_errors(goal_dir))
         errors.extend(final_evidence_preflight_errors(goal_dir, [str(item) for item in expected_ids]))
+    else:
+        errors.extend(delta_evidence_preflight_errors(goal_dir, [str(item) for item in expected_ids]))
     ledger = packet.get("ledger")
     if not isinstance(ledger, dict):
         errors.append("packet ledger must be an object")
@@ -3093,6 +3665,23 @@ def packet_envelope_from_ledger(goal_dir: Path, packet_id: str) -> dict[str, Any
 
 def packet_has_recorded_review(goal_dir: Path, packet_id: str) -> bool:
     return bool(packet_id and any(row.get("packet_id") == packet_id for row in read_csv_rows(goal_dir / "cv.csv")))
+
+
+def cv_row_index(goal_dir: Path, cv_id: str) -> int | None:
+    if not cv_id:
+        return None
+    for index, row in enumerate(read_csv_rows(goal_dir / "cv.csv")):
+        if row.get("cv_id") == cv_id:
+            return index
+    return None
+
+
+def cv_recorded_after(goal_dir: Path, candidate_cv_id: str, baseline_cv_id: str) -> bool:
+    candidate_index = cv_row_index(goal_dir, candidate_cv_id)
+    baseline_index = cv_row_index(goal_dir, baseline_cv_id)
+    if candidate_index is None or baseline_index is None:
+        return False
+    return candidate_index > baseline_index
 
 
 def project_root_from_goal_dir(goal_dir: Path) -> Path:
@@ -3352,7 +3941,7 @@ def derive_verdict(
         if not evidence_ids_for_item or not set(evidence_ids_for_item).issubset(evidence_ids):
             unverified_acceptance.append(item_id)
             continue
-        if not acceptance_evidence_satisfied(item, evidence_rows):
+        if not acceptance_evidence_satisfied(item, evidence_rows, final=True):
             unverified_acceptance.append(item_id)
             continue
         cv_id = item.get("cv_id", "")
@@ -3518,7 +4107,7 @@ def evidence_matches_required_item(evidence: dict[str, str], required: dict[str,
     return True
 
 
-def acceptance_evidence_satisfied(acceptance: dict[str, str], evidence_rows: list[dict[str, str]]) -> bool:
+def acceptance_evidence_satisfied(acceptance: dict[str, str], evidence_rows: list[dict[str, str]], *, final: bool = False) -> bool:
     required_items = required_evidence_items(acceptance)
     if not required_items:
         return False
@@ -3534,7 +4123,12 @@ def acceptance_evidence_satisfied(acceptance: dict[str, str], evidence_rows: lis
     if not supporting:
         return False
     for required in required_items:
-        if not any(evidence_matches_required_item(evidence, required) for evidence in supporting):
+        required_type = str(required.get("type", "")).strip()
+        if final and required_type in FINAL_SCOPED_EVIDENCE_TYPES:
+            matched = any(evidence_matches_final_required_item(evidence, required) for evidence in supporting)
+        else:
+            matched = any(evidence_matches_required_item(evidence, required) for evidence in supporting)
+        if not matched:
             return False
     return True
 
@@ -3561,7 +4155,8 @@ def validate_evidence_record_against_acceptance(goal_dir: Path, record: dict[str
 
 
 def sync_loop_with_plan(goal_dir: Path, *, commit: bool = True) -> list[dict[str, str]]:
-    ensure_loop_file(goal_dir)
+    if commit:
+        ensure_loop_file(goal_dir)
     goal = read_single_csv(goal_dir / "goal.csv") or {}
     existing = read_csv_rows(goal_dir / "loop.csv")
     by_plan = {row.get("plan_item_id", ""): row for row in existing if row.get("plan_item_id")}
@@ -3688,6 +4283,14 @@ def latest_packet_id(goal_dir: Path, review_mode: str) -> str:
     return rows[-1].get("packet_id", "") if rows else ""
 
 
+def delta_verified_acceptance_ids(goal_dir: Path) -> list[str]:
+    return [
+        row.get("id", "")
+        for row in active_required_acceptance_rows(goal_dir)
+        if row.get("delta_status", "") == "pass" and row.get("delta_cv_id", "") and row.get("delta_verified_at", "")
+    ]
+
+
 def cv_id_for_packet(goal_dir: Path, packet_id: str, review_mode: str) -> str:
     if not packet_id:
         return ""
@@ -3791,6 +4394,8 @@ def ledger_audit_data(root: Path, session_id: str, goal_slug: str) -> dict[str, 
     terminal = derived["overall"] if derived["overall"] in TERMINAL_VERDICTS else ""
     latest_exit_packet = latest_packet_id(goal_dir, "exit_review")
     exit_cv_id = cv_id_for_packet(goal_dir, latest_exit_packet, "exit_review")
+    required_acceptance_ids = active_required_acceptance_ids(goal_dir)
+    final_evidence = final_evidence_diagnostics(goal_dir, required_acceptance_ids) if required_acceptance_ids else {"errors": [], "refresh_templates": [], "evidence": []}
     unverified_acceptance_ids = from_json_cell(str(derived.get("unverified_acceptance_ids_json", "")), [])
     attempt_visibility = visible_review_attempts(goal_dir)
     retryable_exit_attempts = [
@@ -3844,8 +4449,14 @@ def ledger_audit_data(root: Path, session_id: str, goal_slug: str) -> dict[str, 
     elif next_plan_item_id:
         next_action = str(loop_context.get("next_required_action", "start_next_stage"))
     elif not latest_exit_packet:
-        next_action = "create_exit_packet"
-        review_mode = "exit_review"
+        if final_evidence.get("errors"):
+            next_action = "refresh_final_evidence"
+            review_mode = "exit_review"
+            missing_acceptance_ids = required_acceptance_ids
+            repair_findings = [str(item) for item in final_evidence.get("errors", [])]
+        else:
+            next_action = "create_exit_packet"
+            review_mode = "exit_review"
     elif retryable_exit_attempts and not exit_cv_id:
         next_action = "retry_review"
         packet_id = latest_exit_packet
@@ -3870,7 +4481,45 @@ def ledger_audit_data(root: Path, session_id: str, goal_slug: str) -> dict[str, 
             repair_findings = [f"exit_review {blocker_kind}: {item}" for item in exit_result.get("blocking_findings", []) or []]
             missing_acceptance_ids = unverified_ids
         elif (
-            exit_result.get("overall") in {"fail", "unknown"}
+            exit_result.get("overall") == "fail"
+            and not exit_result.get("unchecked_acceptance_ids")
+            and not exit_comparison.get("degraded_reviewers")
+        ):
+            affected_ids = [str(item) for item in exit_result.get("checked_acceptance_ids", []) or []] or [
+                str(item) for item in unverified_ids
+            ]
+            next_plan_item_id = earliest_plan_item_for_acceptance_ids(goal_dir, affected_ids)
+            repair_from_cv_id = exit_cv_id
+            repair_findings = [str(item) for item in exit_result.get("blocking_findings", []) or []]
+            if not repair_findings:
+                repair_findings = ["exit_review failed checked acceptance ids: " + ",".join(affected_ids)]
+            missing_acceptance_ids = affected_ids
+            repaired_row = next((row for row in loop_rows if row.get("plan_item_id") == next_plan_item_id), {})
+            repaired_cv_id = repaired_row.get("last_cv_id", "")
+            if (
+                next_plan_item_id
+                and repaired_row.get("status") == "passed"
+                and repaired_cv_id
+                and cv_recorded_after(goal_dir, repaired_cv_id, exit_cv_id)
+            ):
+                next_action = "create_new_packet"
+                review_mode = "exit_review"
+                packet_id = ""
+            elif (
+                next_plan_item_id
+                and safe_int(repaired_row.get("attempt"), 0) >= stage_attempt_limit(goal_dir, next_plan_item_id) > 0
+            ):
+                limit = stage_attempt_limit(goal_dir, next_plan_item_id)
+                next_action = "repair_budget_exhausted"
+                review_mode = "delta_review"
+                repair_findings.append(
+                    f"repair_budget_exhausted: attempt {safe_int(repaired_row.get('attempt'), 0)} reached max_stage_attempts {limit}"
+                )
+            else:
+                next_action = "loop_reopen_stage" if next_plan_item_id else "needs_contract_change"
+                review_mode = "delta_review" if next_plan_item_id else "exit_review"
+        elif (
+            exit_result.get("overall") in {"unknown"}
             or exit_result.get("unchecked_acceptance_ids")
             or exit_comparison.get("degraded_reviewers")
         ):
@@ -3898,6 +4547,9 @@ def ledger_audit_data(root: Path, session_id: str, goal_slug: str) -> dict[str, 
         "repair_from_cv_id": repair_from_cv_id,
         "repair_findings": repair_findings,
         "missing_acceptance_ids": missing_acceptance_ids,
+        "delta_verified_acceptance_ids": delta_verified_acceptance_ids(goal_dir),
+        "final_unverified_acceptance_ids": unverified_acceptance_ids,
+        "final_evidence": final_evidence,
         **loop_context,
         **attempt_visibility,
         "derived_verdict": derived,
@@ -3927,6 +4579,7 @@ def loop_decision(audit: dict[str, Any]) -> dict[str, Any]:
         "retry_review": "packet-read",
         "create_new_packet": "packet-create",
         "refresh_final_evidence": "evidence-add",
+        "loop_reopen_stage": "loop-reopen-stage",
     }
     stop_reasons = {
         "completion_allowed": "no_runnable_action",
@@ -3939,6 +4592,13 @@ def loop_decision(audit: dict[str, Any]) -> dict[str, Any]:
     next_command = continuing_actions.get(next_action, "")
     if next_action in {"start_next_stage", "repair_stage"} and next_plan_item_id:
         next_command = f"loop-start-stage --plan-item-id {next_plan_item_id}"
+    elif next_action == "loop_reopen_stage" and next_plan_item_id:
+        reason = " ".join(str(item) for item in audit.get("repair_findings", []) or []) or "exit review requires stage repair"
+        next_command = (
+            f"loop-reopen-stage --plan-item-id {shlex.quote(next_plan_item_id)} "
+            f"--from-cv-id {shlex.quote(str(audit.get('repair_from_cv_id', '')))} "
+            f"--reason {shlex.quote(reason)}"
+        )
     elif next_action == "create_delta_packet" and next_plan_item_id:
         acceptance_args = " ".join(
             f"--acceptance-id {shlex.quote(item)}"
@@ -3950,14 +4610,14 @@ def loop_decision(audit: dict[str, Any]) -> dict[str, Any]:
     elif next_action in {"record_delta_review", "record_exit_review", "retry_review"} and packet_id:
         mode = review_mode or ("delta_review" if next_action == "record_delta_review" else "exit_review")
         next_command = f"packet-read --review-mode {mode} --packet-id {packet_id}"
+    elif next_action == "create_new_packet" and review_mode == "exit_review":
+        next_command = "packet-create --review-mode exit_review"
     elif next_action == "create_new_packet" and (review_mode == "delta_review" or next_plan_item_id):
         acceptance_args = " ".join(
             f"--acceptance-id {shlex.quote(item)}"
             for item in required_acceptance_ids_for_plan_item(Path(str(audit.get("goal_dir", ""))), next_plan_item_id)
         ) if audit.get("goal_dir") else ""
         next_command = f"packet-create --review-mode delta_review {acceptance_args}".strip()
-    elif next_action == "create_new_packet" and review_mode == "exit_review":
-        next_command = "packet-create --review-mode exit_review"
     elif next_action in {"record_missing_evidence", "run_missing_command_evidence", "refresh_final_evidence"}:
         next_command = "evidence-add"
     next_argv, next_actions = loop_next_action_payload(audit, next_action, next_plan_item_id, packet_id, review_mode)
@@ -4006,6 +4666,26 @@ def loop_next_action_payload(
     if next_action in {"start_next_stage", "repair_stage"} and next_plan_item_id:
         next_argv = [*base_loop_argv(audit, "loop-start-stage"), "--plan-item-id", next_plan_item_id]
         actions.append({"type": "cli", "name": "start_stage", "argv": next_argv})
+    elif next_action == "loop_reopen_stage" and next_plan_item_id:
+        reason = " ".join(str(item) for item in audit.get("repair_findings", []) or []) or "exit review requires stage repair"
+        next_argv = [
+            *base_loop_argv(audit, "loop-reopen-stage"),
+            "--plan-item-id",
+            next_plan_item_id,
+            "--from-cv-id",
+            str(audit.get("repair_from_cv_id", "")),
+            "--reason",
+            reason,
+        ]
+        actions.append(
+            {
+                "type": "cli",
+                "name": "reopen_stage",
+                "argv": next_argv,
+                "from_cv_id": str(audit.get("repair_from_cv_id", "")),
+                "reason": reason,
+            }
+        )
     elif next_action in {"record_missing_evidence", "run_missing_command_evidence", "refresh_final_evidence"}:
         missing_ids = [str(item) for item in audit.get("missing_acceptance_ids", []) or []]
         actions.append(
@@ -4015,20 +4695,22 @@ def loop_next_action_payload(
                 "argv_prefix": base_loop_argv(audit, "evidence-add"),
                 "missing_acceptance_ids": missing_ids,
                 "supported_evidence_types": sorted(EVIDENCE_TYPES),
+                "blockers": [str(item) for item in (audit.get("final_evidence", {}) or {}).get("errors", [])],
+                "refresh_templates": list((audit.get("final_evidence", {}) or {}).get("refresh_templates", [])),
                 "after_success": [*base_loop_argv(audit, "packet-create"), "--review-mode", "exit_review"]
                 if next_action == "refresh_final_evidence"
                 else [],
             }
         )
+    elif next_action in {"create_exit_packet", "create_new_packet"} and review_mode == "exit_review":
+        next_argv = [*base_loop_argv(audit, "packet-create"), "--review-mode", "exit_review"]
+        actions.append({"type": "cli", "name": "create_exit_packet", "argv": next_argv})
     elif next_action in {"create_delta_packet", "create_new_packet"} and (review_mode == "delta_review" or next_plan_item_id):
         acceptance_ids = required_acceptance_ids_for_plan_item(goal_dir, next_plan_item_id) if goal_dir is not None else []
         next_argv = [*base_loop_argv(audit, "packet-create"), "--review-mode", "delta_review"]
         for acceptance_id in acceptance_ids:
             next_argv.extend(["--acceptance-id", acceptance_id])
         actions.append({"type": "cli", "name": "create_delta_packet", "argv": next_argv, "acceptance_ids": acceptance_ids})
-    elif next_action in {"create_exit_packet", "create_new_packet"} and review_mode == "exit_review":
-        next_argv = [*base_loop_argv(audit, "packet-create"), "--review-mode", "exit_review"]
-        actions.append({"type": "cli", "name": "create_exit_packet", "argv": next_argv})
     elif next_action in {"record_delta_review", "record_exit_review", "retry_review"} and packet_id:
         mode = review_mode or ("delta_review" if next_action == "record_delta_review" else "exit_review")
         next_argv = [*base_loop_argv(audit, "packet-read"), "--review-mode", mode, "--packet-id", packet_id]
@@ -4143,8 +4825,8 @@ def acceptance_rows_from_exit_review(goal_dir: Path, cv_result: dict[str, Any], 
     if overall == "blocked" and blocker_kind != "terminal_blocked":
         return [], read_csv_rows(goal_dir / "acceptance.csv")
     checked = {str(item) for item in result.get("checked_acceptance_ids", [])}
-    support = supporting_evidence_by_acceptance(goal_dir)
-    evidence_rows = read_csv_rows(goal_dir / "evidence.csv")
+    support = supporting_evidence_by_acceptance(goal_dir, "exit_review")
+    evidence_rows = selected_final_evidence_rows(goal_dir, list(checked))
     path = goal_dir / "acceptance.csv"
     rows = read_csv_rows(path)
     updated: list[str] = []
@@ -4163,7 +4845,7 @@ def acceptance_rows_from_exit_review(goal_dir: Path, cv_result: dict[str, Any], 
         if not isinstance(current_ids, list):
             current_ids = []
         if overall == "pass":
-            if not evidence_ids or not acceptance_evidence_satisfied(row, evidence_rows):
+            if not evidence_ids or not acceptance_evidence_satisfied(row, evidence_rows, final=True):
                 continue
             validate_state_transition("acceptance", row.get("status", "unknown"), "pass")
             row["status"] = "pass"
@@ -4176,6 +4858,32 @@ def acceptance_rows_from_exit_review(goal_dir: Path, cv_result: dict[str, Any], 
         row["verified_at"] = timestamp
         updated.append(acceptance_id)
     return updated, rows
+
+
+def acceptance_rows_from_delta_review(
+    goal_dir: Path,
+    target_acceptance_ids: list[str],
+    cv_id: str,
+    result: dict[str, Any],
+    loop_status: str,
+) -> list[dict[str, str]]:
+    rows = read_csv_rows(goal_dir / "acceptance.csv")
+    timestamp = now_iso()
+    result_status = str(result.get("overall", "unknown"))
+    if loop_status == "passed":
+        delta_status = "pass"
+    elif result_status in {"fail", "unknown", "blocked"}:
+        delta_status = result_status
+    else:
+        delta_status = "unknown"
+    target = {str(item) for item in target_acceptance_ids}
+    for row in rows:
+        if row.get("id", "") not in target or row.get("status") == "superseded":
+            continue
+        row["delta_status"] = delta_status
+        row["delta_cv_id"] = cv_id
+        row["delta_verified_at"] = timestamp
+    return rows
 
 
 def terminal_status_writes(root: Path, session_id: str, goal_slug: str, verdict_overall: str) -> tuple[list[CsvWrite], list[str]]:
@@ -4238,11 +4946,7 @@ def stage_attempt_limit(goal_dir: Path, plan_item_id: str) -> int:
         budget = {}
     if not isinstance(budget, dict):
         return 0
-    max_stage_attempts = safe_int(budget.get("max_stage_attempts"), 0)
-    if max_stage_attempts > 0:
-        return max_stage_attempts
-    retry_limit = safe_int(budget.get("retry_limit"), 0)
-    return retry_limit + 1 if retry_limit > 0 else 0
+    return safe_int(budget.get("max_stage_attempts"), 0)
 
 
 def missing_evidence_types(goal_dir: Path, target_acceptance_ids: list[str]) -> list[str]:
@@ -4415,6 +5119,17 @@ def record_cv_result(
         if target_plan_item_id is None:
             raise MobiusError("target_plan_item_id is required for delta_review")
         validate_delta_targets(goal_dir, target_plan_item_id, target_ids)
+        if result.get("overall") == "pass" and explicit_review_policy(cv_result) is None:
+            raise MobiusError("pass result requires input_refs.review_policy")
+        expected_policy = review_policy_for_delta_targets(
+            goal_dir,
+            target_plan_item_id,
+            target_ids,
+            explicit_review_policy(cv_result) or {"level": cv_result.get("level")},
+            level=safe_int(cv_result.get("level"), 1),
+        )
+        if explicit_review_policy(cv_result) != expected_policy:
+            raise MobiusError("input_refs.review_policy does not match required delta review policy for stage risk")
         packet = packet_envelope_from_ledger(goal_dir, str(cv_result.get("packet_id", "")))
         if packet is None:
             raise MobiusError("packet_id is not recorded in packets.csv")
@@ -4451,15 +5166,18 @@ def record_cv_result(
             last_cv_id=cv_id,
             blocking_findings=[str(item) for item in blocking],
         )
+        acceptance_rows = acceptance_rows_from_delta_review(goal_dir, target_ids, cv_id, result, loop_status)
         cv_rows = [*read_csv_rows(goal_dir / "cv.csv"), cv_row]
-        verdict = derive_verdict(goal_dir, cv_rows=cv_rows)
+        verdict = derive_verdict(goal_dir, acceptance_rows=acceptance_rows, cv_rows=cv_rows)
         write_csv_files_atomically(
             [
                 (goal_dir / "cv.csv", CV_FIELDS, cv_rows),
+                (goal_dir / "acceptance.csv", ACCEPTANCE_FIELDS, acceptance_rows),
                 (goal_dir / "loop.csv", LOOP_FIELDS, loop_rows),
                 (goal_dir / "verdict.csv", VERDICT_FIELDS, [verdict]),
             ]
         )
+        updated_files.append("acceptance.csv")
         updated_files.append("loop.csv")
         updated_files.append("verdict.csv")
         errors = validate_contract_dir(goal_dir)
@@ -4504,7 +5222,6 @@ def record_cv_result(
     updated_acceptance, acceptance_rows = acceptance_rows_from_exit_review(goal_dir, cv_result, blocker_kind)
     updated_files.append("acceptance.csv")
     repair_plan_item_id = ""
-    loop_rows: list[dict[str, str]] | None = None
     retry_exit_review = bool(comparison.get("degraded_reviewers") or result.get("unchecked_acceptance_ids"))
     if result.get("overall") == "fail" and not retry_exit_review:
         affected_acceptance_ids = [str(item) for item in result.get("checked_acceptance_ids", []) or []]
@@ -4512,38 +5229,6 @@ def record_cv_result(
         if repair_plan_item_id:
             if not blocking:
                 blocking.append("exit_review failed checked acceptance ids: " + ",".join(affected_acceptance_ids))
-            loop_rows = sync_loop_with_plan(goal_dir, commit=False)
-            current_loop = next((row for row in loop_rows if row.get("plan_item_id") == repair_plan_item_id), {})
-            classification = classify_delta_review(
-                goal_dir,
-                repair_plan_item_id,
-                affected_acceptance_ids,
-                result,
-                comparison,
-                attempt=safe_int(current_loop.get("attempt"), 0),
-            )
-            loop_status = str(classification["status"])
-            blocking = list(classification["blocking_findings"])
-            if current_loop.get("status") == "passed" and loop_status == "blocked":
-                upsert_loop_state_in_rows(
-                    goal_dir,
-                    loop_rows,
-                    repair_plan_item_id,
-                    "running",
-                    last_packet_id=str(cv_result.get("packet_id", "")),
-                    last_cv_id=cv_id,
-                    blocking_findings=[str(item) for item in blocking],
-                )
-            upsert_loop_state_in_rows(
-                goal_dir,
-                loop_rows,
-                repair_plan_item_id,
-                loop_status,
-                last_packet_id=str(cv_result.get("packet_id", "")),
-                last_cv_id=cv_id,
-                blocking_findings=[str(item) for item in blocking],
-            )
-            updated_files.append("loop.csv")
     if result.get("overall") == "blocked" and blocker_kind != "terminal_blocked":
         blocking = [f"exit_review {blocker_kind}: {item}" for item in blocking] or [f"exit_review {blocker_kind}"]
     verdict = derive_verdict(goal_dir, acceptance_rows=acceptance_rows, cv_rows=cv_rows)
@@ -4557,8 +5242,6 @@ def record_cv_result(
         (goal_dir / "verdict.csv", VERDICT_FIELDS, [verdict]),
         *terminal_writes,
     ]
-    if loop_rows is not None:
-        writes.append((goal_dir / "loop.csv", LOOP_FIELDS, loop_rows))
     write_csv_files_atomically(writes)
     updated_files.extend(terminal_updated_files)
     errors = validate_contract_dir(goal_dir)
@@ -4603,8 +5286,8 @@ def cmd_loop_status(args: argparse.Namespace) -> int:
     if locked_result is not None:
         json_print(locked_result)
         return 2
-    rows = sync_loop_with_plan(goal_dir)
-    next_item = loop_next_plan_item(goal_dir)
+    rows = sync_loop_with_plan(goal_dir, commit=False)
+    next_item = loop_next_plan_item(goal_dir, commit=False)
     json_print(
         loop_command_result(
             "loop-status",
@@ -4681,6 +5364,8 @@ def cmd_packet_read(args: argparse.Namespace) -> int:
         return 2
     reviewed = packet_has_recorded_review(goal_dir, packet_id)
     target_plan_item_id = str(packet.get("scope", "")) if args.review_mode == "delta_review" else ""
+    review_allowed = not reviewed
+    contract_view = review_contract_view(goal_dir, packet, args.review_mode, expected_ids, review_allowed=review_allowed)
     json_print(
         loop_command_result(
             "packet-read",
@@ -4691,9 +5376,11 @@ def cmd_packet_read(args: argparse.Namespace) -> int:
                 "packet": packet,
                 "packet_sha256": packet_hash(packet),
                 "review_mode": args.review_mode,
-                "review_allowed": not reviewed,
+                "review_allowed": review_allowed,
                 "target_plan_item_id": target_plan_item_id,
                 "required_acceptance_ids": expected_ids,
+                "review_contract_view": contract_view,
+                "reviewer_checklist": reviewer_checklist(goal_dir, packet, args.review_mode, expected_ids),
             },
         )
     )
@@ -4747,6 +5434,85 @@ def cmd_loop_start_stage(args: argparse.Namespace) -> int:
             args.goal_slug,
             updated_files=["loop.csv", "verdict.csv"],
             data={"row": row, "stage_contract": stage_contract, "verdict": verdict},
+        )
+    )
+    return 0
+
+
+def cmd_loop_reopen_stage(args: argparse.Namespace) -> int:
+    root = project_root(args)
+    goal_dir = load_goal_dir(root, args.session_id, args.goal_slug)
+    terminal_result = terminal_command_result("loop-reopen-stage", goal_dir)
+    if terminal_result is not None:
+        json_print(terminal_result)
+        return 2
+    errors = validate_contract_dir(goal_dir)
+    if errors:
+        json_print(command_contract_error("loop-reopen-stage", goal_dir, errors))
+        return 2
+    locked_result = locked_contract_command_result("loop-reopen-stage", goal_dir)
+    if locked_result is not None:
+        json_print(locked_result)
+        return 2
+    reason = args.reason.strip()
+    if not reason:
+        json_print(command_result("loop-reopen-stage", ok=False, goal_dir=goal_dir, errors=["reason is required"]))
+        return 2
+    if not any(row.get("cv_id") == args.from_cv_id for row in read_csv_rows(goal_dir / "cv.csv")):
+        json_print(command_result("loop-reopen-stage", ok=False, goal_dir=goal_dir, errors=[f"from-cv-id not found: {args.from_cv_id}"]))
+        return 2
+    rows = sync_loop_with_plan(goal_dir, commit=False)
+    row = next((item for item in rows if item.get("plan_item_id") == args.plan_item_id), None)
+    if row is None:
+        json_print(command_result("loop-reopen-stage", ok=False, goal_dir=goal_dir, errors=[f"plan item is not active required: {args.plan_item_id}"]))
+        return 2
+    current_status = row.get("status", "pending")
+    if current_status not in {"passed", "blocked"}:
+        json_print(
+            command_result(
+                "loop-reopen-stage",
+                ok=False,
+                goal_dir=goal_dir,
+                errors=[f"loop-reopen-stage requires passed or blocked stage, got {current_status}"],
+            )
+        )
+        return 2
+    attempt = safe_int(row.get("attempt"), 0)
+    attempt_limit = stage_attempt_limit(goal_dir, args.plan_item_id)
+    if attempt_limit and attempt >= attempt_limit:
+        json_print(
+            command_result(
+                "loop-reopen-stage",
+                ok=False,
+                goal_dir=goal_dir,
+                errors=[f"repair_budget_exhausted: attempt {attempt} reached max_stage_attempts {attempt_limit}"],
+                next_required_action="repair_budget_exhausted",
+            )
+        )
+        return 2
+    row["status"] = "running"
+    row["attempt"] = str(attempt + 1)
+    row["last_packet_id"] = ""
+    row["last_cv_id"] = args.from_cv_id
+    row["blocking_findings_json"] = as_json_cell([reason])
+    row["updated_at"] = now_iso()
+    try:
+        write_csv_rows(goal_dir / "loop.csv", LOOP_FIELDS, rows)
+    except MobiusError as exc:
+        json_print(command_result("loop-reopen-stage", ok=False, goal_dir=goal_dir, errors=[str(exc)], next_required_action="retry_after_storage_error"))
+        return 2
+    errors = validate_contract_dir(goal_dir)
+    if errors:
+        json_print(command_contract_error("loop-reopen-stage", goal_dir, errors, updated_files=["loop.csv"], data={"row": row}))
+        return 2
+    json_print(
+        loop_command_result(
+            "loop-reopen-stage",
+            root,
+            args.session_id,
+            args.goal_slug,
+            updated_files=["loop.csv"],
+            data={"row": row},
         )
     )
     return 0
@@ -4858,6 +5624,243 @@ def packet_summary(goal_dir: Path, packet_id: str) -> dict[str, Any]:
     }
 
 
+def reviewer_checklist(goal_dir: Path, packet: dict[str, Any], review_mode: str, acceptance_ids: list[str]) -> list[dict[str, Any]]:
+    acceptance = active_acceptance_by_id(goal_dir)
+    refs = packet.get("refs") if isinstance(packet.get("refs"), dict) else {}
+    checklist: list[dict[str, Any]] = []
+    for acceptance_id in [str(item) for item in acceptance_ids]:
+        row = acceptance.get(acceptance_id, {})
+        checklist.append(
+            {
+                "id": acceptance_id,
+                "review_mode": review_mode,
+                "requirement": row.get("requirement", ""),
+                "observable_outcome": row.get("observable_outcome", ""),
+                "required_evidence": required_evidence_items(row),
+                "evidence_ids": list((packet.get("coverage") or {}).get(acceptance_id, [])) if isinstance(packet.get("coverage"), dict) else [],
+                "contract_fields": ["scope_json", "work_json", "gate_json", "recovery_json", "budget_json", "acceptance_ids_json"],
+                "disconfirmers": [
+                    "Does any checked evidence fail to prove the locked observable outcome?",
+                    "Does a command, metric, or process act as a proxy instead of direct proof?",
+                    "Do absence, security, architecture, or pruning claims have counterevidence?",
+                    "Are packet refs stale, incomplete, or inconsistent with local ledger rows?",
+                ],
+                "refs_present": sorted(refs),
+            }
+        )
+    return checklist
+
+
+def json_cell_or_default(value: str, default: Any) -> Any:
+    try:
+        parsed = from_json_cell(value, default)
+    except json.JSONDecodeError:
+        return default
+    return parsed
+
+
+def json_cell_list(value: str) -> list[Any]:
+    parsed = json_cell_or_default(value, [])
+    return parsed if isinstance(parsed, list) else []
+
+
+def json_cell_dict(value: str) -> dict[str, Any]:
+    parsed = json_cell_or_default(value, {})
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def review_focus_falsifiers(review_focus: list[Any]) -> list[str]:
+    falsifiers: list[str] = []
+    for item in review_focus:
+        if isinstance(item, dict):
+            for key in ("counterevidence", "falsifier", "disconfirming_observation", "blind_spot"):
+                value = str(item.get(key, "")).strip()
+                if value:
+                    falsifiers.append(value)
+        else:
+            value = str(item).strip()
+            if value:
+                falsifiers.append(value)
+    if not falsifiers:
+        falsifiers = [
+            "required evidence does not prove observable_outcome",
+            "packet refs are stale, incomplete, or inconsistent with ledgers",
+        ]
+    return dedupe_strings(falsifiers)
+
+
+def review_contract_goal_boundary(goal_dir: Path) -> dict[str, Any]:
+    try:
+        front, body = parse_goal_contract(goal_dir / "goal.md")
+    except (MobiusError, tomllib.TOMLDecodeError):
+        front, body = {}, ""
+    objective = str(front.get("title") or goal_dir.name)
+    user_goal = ""
+    if "## User Goal" in body:
+        section = body.split("## User Goal", 1)[1]
+        user_goal = section.split("## ", 1)[0].strip()
+    return {
+        "goal_slug": goal_dir.name,
+        "goal_title": objective,
+        "user_goal": user_goal[:500],
+        "non_claims": [str(item) for item in front.get("non_goals", [])] if isinstance(front.get("non_goals"), list) else [],
+    }
+
+
+def review_contract_plan_rows(goal_dir: Path, packet: dict[str, Any], review_mode: str) -> list[dict[str, Any]]:
+    scope = str(packet.get("scope", ""))
+    rows = active_required_plan_items(goal_dir)
+    if review_mode == "delta_review":
+        rows = [row for row in rows if row.get("id") == scope]
+    contract_rows: list[dict[str, Any]] = []
+    for row in rows:
+        contract_rows.append(
+            {
+                "id": row.get("id", ""),
+                "title": row.get("title", ""),
+                "description": row.get("description", ""),
+                "scope_json": json_cell_dict(row.get("scope_json", "")),
+                "work_json": json_cell_dict(row.get("work_json", "")),
+                "gate_json": json_cell_dict(row.get("gate_json", "")),
+                "acceptance_ids": json_cell_list(row.get("acceptance_ids_json", "")),
+            }
+        )
+    return contract_rows
+
+
+def review_contract_acceptance_matrix(goal_dir: Path, packet: dict[str, Any], review_mode: str, acceptance_ids: list[str]) -> list[dict[str, Any]]:
+    acceptance = active_acceptance_by_id(goal_dir)
+    coverage = packet.get("coverage") if isinstance(packet.get("coverage"), dict) else {}
+    matrix: list[dict[str, Any]] = []
+    for acceptance_id in [str(item) for item in acceptance_ids]:
+        row = acceptance.get(acceptance_id, {})
+        review_focus = json_cell_list(row.get("review_focus_json", ""))
+        matrix.append(
+            {
+                "id": acceptance_id,
+                "plan_item_id": row.get("plan_item_id", ""),
+                "review_mode": review_mode,
+                "requirement": row.get("requirement", ""),
+                "observable_outcome": row.get("observable_outcome", ""),
+                "required_evidence": required_evidence_items(row),
+                "verifier": json_cell_list(row.get("verifier_json", "")),
+                "review_focus": review_focus,
+                "falsifiers": review_focus_falsifiers(review_focus),
+                "packet_evidence_ids": list(coverage.get(acceptance_id, [])) if isinstance(coverage.get(acceptance_id, []), list) else [],
+            }
+        )
+    return matrix
+
+
+def cv_policy_for_packet(goal_dir: Path, packet_id: str, review_mode: str) -> dict[str, Any] | None:
+    for row in reversed(read_csv_rows(goal_dir / "cv.csv")):
+        if row.get("packet_id") != packet_id or row.get("review_mode") != review_mode:
+            continue
+        input_refs = json_cell_dict(row.get("input_refs_json", ""))
+        policy = input_refs.get("review_policy")
+        return policy if isinstance(policy, dict) else None
+    return None
+
+
+def review_contract_policy(goal_dir: Path, packet: dict[str, Any], review_mode: str, acceptance_ids: list[str]) -> dict[str, Any]:
+    packet_id = str(packet.get("packet", ""))
+    recorded_policy = cv_policy_for_packet(goal_dir, packet_id, review_mode)
+    if recorded_policy is not None:
+        return {"source": "cv.csv.input_refs_json.review_policy", "policy": recorded_policy}
+    if review_mode == "delta_review":
+        plan_item_id = str(packet.get("scope", ""))
+        policy = review_policy_for_delta_targets(goal_dir, plan_item_id, acceptance_ids, {"level": 1}, level=1)
+        return {"source": "plan.csv.gate_json/default", "policy": policy}
+    return {"source": "review_mode/default", "policy": review_gate_policy("exit_review", {"level": 2})}
+
+
+def review_contract_relation_label(goal_dir: Path, packet_id: str, review_allowed: bool) -> str:
+    terminal = terminal_verdict(goal_dir)
+    if terminal:
+        return "new_audit_of_current_workspace"
+    if not review_allowed and packet_id:
+        return "prior_review_process_audit"
+    return "new_review_target"
+
+
+def review_contract_view(
+    goal_dir: Path,
+    packet: dict[str, Any],
+    review_mode: str,
+    acceptance_ids: list[str],
+    *,
+    review_allowed: bool,
+) -> dict[str, Any]:
+    packet_id = str(packet.get("packet", ""))
+    refs = packet.get("refs") if isinstance(packet.get("refs"), dict) else {}
+    coverage = packet.get("coverage") if isinstance(packet.get("coverage"), dict) else {}
+    packet_sha = packet_hash(packet)
+    target_plan_item_id = str(packet.get("scope", "")) if review_mode == "delta_review" else ""
+    terminal = terminal_verdict(goal_dir)
+    return {
+        "schema": "mobius.review_contract_view",
+        "derived": True,
+        "authoritative": False,
+        "storage": "none",
+        "source_of_truth": [
+            "goal.md",
+            "plan.csv",
+            "acceptance.csv",
+            "evidence.csv",
+            "packets.csv.packet_json",
+            "cv.csv.input_refs_json.review_policy",
+            "loop.csv",
+            "verdict.csv",
+        ],
+        "review_target": {
+            "id": f"{goal_dir.name}:{packet_id}:{review_mode}",
+            "goal_slug": goal_dir.name,
+            "packet_id": packet_id,
+            "packet_sha256": packet_sha,
+            "review_mode": review_mode,
+            "target_plan_item_id": target_plan_item_id,
+            "scope": packet.get("scope", ""),
+        },
+        "relation_to_prior": {
+            "label": review_contract_relation_label(goal_dir, packet_id, review_allowed),
+            "audit_only": True,
+            "review_allowed": review_allowed,
+            "terminal_state": terminal or "nonterminal",
+            "allowed_labels": [
+                "new_review_target",
+                "new_audit_of_current_workspace",
+                "explicit_reopen",
+                "prior_review_process_audit",
+            ],
+        },
+        "claim_boundary": {
+            "goal": review_contract_goal_boundary(goal_dir),
+            "plan_items": review_contract_plan_rows(goal_dir, packet, review_mode),
+            "acceptance_ids": [str(item) for item in acceptance_ids],
+        },
+        "evidence_boundary": {
+            "compact_only": True,
+            "full_content_embedded": False,
+            "packet_coverage": coverage,
+            "packet_refs": refs,
+            "ledger_root": str((packet.get("ledger") or {}).get("root", "")) if isinstance(packet.get("ledger"), dict) else "",
+            "evidence_ids": sorted(str(item) for ids in coverage.values() if isinstance(ids, list) for item in ids),
+        },
+        "acceptance_matrix": review_contract_acceptance_matrix(goal_dir, packet, review_mode, acceptance_ids),
+        "review_policy": review_contract_policy(goal_dir, packet, review_mode, acceptance_ids),
+        "terminal_rule": {
+            "explanatory_only": True,
+            "rule": "DONE/accepted/blocked terminal targets must not be silently re-reviewed; use an explicit reopen or new target path.",
+            "mobius_recording": "recorded MobiusCV reviews reject terminal goals unless an existing explicit reopen/new-target path applies",
+        },
+        "output_contract": {
+            "surface": "MobiusCV recorded review",
+            "required_result_block": "MOBIUS_CV_REVIEWER_RESULT",
+            "not_universal": True,
+        },
+    }
+
+
 def cmd_explain(args: argparse.Namespace) -> int:
     root = project_root(args)
     goal_dir = load_goal_dir(root, args.session_id, args.goal_slug)
@@ -4887,7 +5890,10 @@ def cmd_explain(args: argparse.Namespace) -> int:
             "failed": attempts["failed_review_attempts"],
         },
         "last_cv": latest_cv_summary(goal_dir),
+        "delta_verified_acceptance_ids": audit.get("delta_verified_acceptance_ids", []),
+        "final_unverified_acceptance_ids": audit.get("final_unverified_acceptance_ids", []),
         "unverified_acceptance_ids": audit.get("unverified_acceptance_ids", []),
+        "final_evidence": audit.get("final_evidence", {}),
         "repair_findings": loop.get("repair_findings", []),
         "generated_runtime_artifacts": generated_python_artifacts(root),
     }
@@ -4904,11 +5910,155 @@ def cmd_explain(args: argparse.Namespace) -> int:
 
 
 def plugin_root() -> Path:
+    override = os.environ.get("MOBIUS_PLUGIN_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     return Path(__file__).resolve().parents[1]
+
+
+def plugin_run_location(root: Path) -> str:
+    text = str(root)
+    if "/.codex/plugins/cache/" in text:
+        return "installed_cache" if root.exists() else "stale_cache_path"
+    return "source"
+
+
+def writable_dir_status(path_text: str) -> dict[str, Any]:
+    if not path_text:
+        return {"status": "unset", "writable": False, "path": ""}
+    path = Path(path_text).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path, prefix=".mobius-doctor-", delete=True) as handle:
+            handle.write("ok")
+        return {"status": "writable", "writable": True, "path": str(path)}
+    except OSError as exc:
+        return {"status": "unwritable", "writable": False, "path": str(path), "error": str(exc)}
+
+
+def mcp_self_check_status(mcp_launcher: Path) -> dict[str, Any]:
+    if not mcp_launcher.is_file():
+        return {"status": "missing_launcher", "ready": False, "stdout": "", "stderr": ""}
+    bash = "/bin/bash" if Path("/bin/bash").is_file() else shutil.which("bash")
+    if not bash:
+        return {"status": "missing_bash", "ready": False, "stdout": "", "stderr": ""}
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = env.get("PYTHONDONTWRITEBYTECODE", "1")
+    try:
+        result = subprocess.run(
+            [bash, str(mcp_launcher), "--self-check"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=45,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "timeout",
+            "ready": False,
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+        }
+    except OSError as exc:
+        return {"status": "launch_error", "ready": False, "stdout": "", "stderr": str(exc)}
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    ready = result.returncode == 0 and stdout.endswith("mobius-cv-launcher-ok")
+    return {
+        "status": "ready" if ready else "failed",
+        "ready": ready,
+        "exit_code": result.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def doctor_data() -> tuple[bool, list[str], dict[str, Any]]:
+    root = plugin_root()
+    location = plugin_run_location(root)
+    hooks_file = root / "hooks" / "hooks.json"
+    hook_launcher = root / "scripts" / "mobius_hook_launcher.sh"
+    mcp_launcher = root / "scripts" / "mobius_cv_mcp_server.sh"
+    python3 = shutil.which("python3")
+    uv = os.environ.get("MOBIUS_CV_UV") or shutil.which("uv")
+    platform_status = "supported" if os.name == "posix" else "unsupported"
+    errors: list[str] = []
+    if platform_status != "supported":
+        errors.append("unsupported platform: Mobius plugin launchers require a Unix-like POSIX shell")
+    if location == "stale_cache_path":
+        errors.append("installed plugin cache path is stale; reinstall or refresh the Mobius plugin")
+    if not hooks_file.is_file():
+        errors.append("hooks/hooks.json is missing")
+    if not hook_launcher.is_file():
+        errors.append("scripts/mobius_hook_launcher.sh is missing")
+    if python3 is None:
+        errors.append("python3 is not on PATH")
+    if not mcp_launcher.is_file():
+        errors.append("scripts/mobius_cv_mcp_server.sh is missing")
+    if not uv:
+        errors.append("uv is not on PATH; install uv or set MOBIUS_CV_UV for MobiusCV MCP")
+    mcp_self_check = mcp_self_check_status(mcp_launcher) if platform_status == "supported" and mcp_launcher.is_file() and uv else {
+        "status": "not_run",
+        "ready": False,
+        "stdout": "",
+        "stderr": "",
+    }
+    if uv and mcp_launcher.is_file() and platform_status == "supported" and not mcp_self_check.get("ready"):
+        detail = str(mcp_self_check.get("stderr") or mcp_self_check.get("stdout") or mcp_self_check.get("status", "")).strip()
+        errors.append("MobiusCV MCP self-check failed" + (f": {detail}" if detail else ""))
+    plugin_data_status = writable_dir_status(os.environ.get("PLUGIN_DATA", ""))
+    if os.environ.get("PLUGIN_DATA") and not plugin_data_status.get("writable"):
+        errors.append("PLUGIN_DATA is not writable")
+    hook_status = "active"
+    if location == "stale_cache_path":
+        hook_status = "stale_cache_path"
+    elif platform_status != "supported":
+        hook_status = "unsupported_platform"
+    elif not hooks_file.exists() or not hook_launcher.exists() or python3 is None:
+        hook_status = "inactive"
+    data = {
+        "plugin_root": str(root),
+        "run_location": location,
+        "platform": {"os_name": os.name, "status": platform_status},
+        "python": {"python3": python3, "available": python3 is not None},
+        "uv": {"path": uv or "", "available": bool(uv), "source": "MOBIUS_CV_UV" if os.environ.get("MOBIUS_CV_UV") else "PATH"},
+        "hooks": {
+            "status": hook_status,
+            "hooks_file": str(hooks_file),
+            "launcher": str(hook_launcher),
+            "trust_guidance": "Review changed Mobius hooks with /hooks after reinstall or plugin cache refresh.",
+        },
+        "mcp": {
+            "launcher": str(mcp_launcher),
+            "launcher_present": mcp_launcher.is_file(),
+            "uv_required": True,
+            "self_check": mcp_self_check,
+            "start_ready": bool(mcp_self_check.get("ready")),
+        },
+        "plugin_data": plugin_data_status,
+    }
+    return not errors, errors, data
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    ok, errors, data = doctor_data()
+    json_print(
+        command_result(
+            "doctor",
+            ok=ok,
+            errors=errors,
+            gate="ready" if ok else "blocked",
+            next_required_action="continue_loop" if ok else "repair_plugin_install",
+            data=data,
+        )
+    )
+    return 0 if ok else 2
 
 
 def cmd_hook_health(args: argparse.Namespace) -> int:
     root = plugin_root()
+    _doctor_ok, _doctor_errors, doctor = doctor_data()
     hooks_file = root / "hooks" / "hooks.json"
     script = root / "scripts" / "mobius.py"
     events: list[str] = []
@@ -4927,6 +6077,8 @@ def cmd_hook_health(args: argparse.Namespace) -> int:
         errors.append("scripts/mobius.py is missing")
     if shutil.which("python3") is None:
         errors.append("python3 is not on PATH")
+    if doctor.get("platform", {}).get("status") != "supported":
+        errors.append("unsupported platform")
     location = "installed_cache" if "/.codex/plugins/cache/" in str(root) else "source"
     ok = not errors
     json_print(
@@ -4939,6 +6091,7 @@ def cmd_hook_health(args: argparse.Namespace) -> int:
             data={
                 "plugin_root": str(root),
                 "run_location": location,
+                "hook_status": doctor.get("hooks", {}).get("status", "unknown"),
                 "hooks_file": str(hooks_file),
                 "hook_file_present": hooks_file.exists(),
                 "expected_hook_events": ["PreToolUse", "Stop"],
@@ -5174,7 +6327,10 @@ def mobius_path_binding(value: str, default_root: Path) -> dict[str, Any] | None
             "filename": "run.csv",
         }
     session_id = run_name.removeprefix("codex-session-")
-    filename = re.split(r"[^A-Za-z0-9._-]", parts[2], maxsplit=1)[0] if len(parts) > 2 else ""
+    raw_filename = parts[2] if len(parts) > 2 else ""
+    filename = re.split(r"[^A-Za-z0-9._-]", raw_filename, maxsplit=1)[0] if raw_filename else ""
+    if raw_filename and ledger_filename_candidate(raw_filename):
+        filename = shell_filename_fragment(raw_filename) or filename
     goal_dir = root / ".mobius" / "runs" / run_name / goal_slug
     return {
         "root": root,
@@ -5185,26 +6341,59 @@ def mobius_path_binding(value: str, default_root: Path) -> dict[str, Any] | None
     }
 
 
-def path_mentions_file(value: str, filename: str) -> bool:
-    normalized = value.replace("\\", "/")
-    return bool(re.search(rf"(?:^|/){re.escape(filename)}(?=$|[^A-Za-z0-9._-])", normalized))
+def shell_filename_fragment(value: str) -> str:
+    return re.split(r"[|&;<>()\s]", value.strip("'\""), maxsplit=1)[0]
+
+
+def shell_brace_expansions(value: str, *, limit: int = 64) -> list[str]:
+    fragment = shell_filename_fragment(value)
+    match = re.search(r"\{([^{}]*)\}", fragment)
+    if not match:
+        return [fragment]
+    options = match.group(1).split(",")
+    if not options:
+        return [fragment]
+    expanded: list[str] = []
+    for option in options:
+        expanded.extend(shell_brace_expansions(fragment[: match.start()] + option + fragment[match.end() :], limit=limit))
+        if len(expanded) >= limit:
+            return expanded[:limit]
+    return expanded
+
+
+def codex_session_segment_candidate(value: str) -> bool:
+    for segment in shell_brace_expansions(value):
+        if segment.startswith("codex-session-"):
+            return True
+        if fnmatch.fnmatchcase("codex-session-s", segment):
+            return True
+    return False
+
+
+def ledger_filename_candidate(value: str) -> bool:
+    for filename in shell_brace_expansions(value):
+        if filename in PROTECTED_LEDGER_FILENAMES:
+            return True
+        if any(fnmatch.fnmatchcase(protected, filename) for protected in PROTECTED_LEDGER_FILENAMES):
+            return True
+    return False
 
 
 def protected_ledger_candidate(value: str) -> bool:
     normalized = value.replace("\\", "/")
-    protected = (
-        "run.csv",
-        "goal.csv",
-        "plan.csv",
-        "acceptance.csv",
-        "evidence.csv",
-        "packets.csv",
-        "cv.csv",
-        "loop.csv",
-        "review_attempts.csv",
-        "verdict.csv",
-    )
-    return ".mobius/" in normalized and any(path_mentions_file(normalized, filename) for filename in protected)
+    marker = ".mobius/runs/"
+    marker_index = normalized.find(marker)
+    if marker_index < 0:
+        return False
+    rest = normalized[marker_index + len(marker) :]
+    parts = [part for part in rest.split("/") if part]
+    if len(parts) < 2 or not codex_session_segment_candidate(parts[0]):
+        return False
+    if len(parts) == 2:
+        return ledger_filename_candidate(parts[1]) and any(
+            fnmatch.fnmatchcase("run.csv", filename) for filename in shell_brace_expansions(parts[1])
+        )
+    return ledger_filename_candidate(parts[2])
 
 
 def command_redirects_to_protected_ledger(tokens: list[str]) -> bool:
@@ -5224,13 +6413,24 @@ def command_reads_protected_ledger(tokens: list[str]) -> bool:
         return False
     if command_redirects_to_protected_ledger(tokens):
         return False
-    if any(re.search(r"[|&;<>()[\]{}]", token) for token in tokens[1:]):
+    if any(token in {"&&", "||", ";", "&", "(", ")", "{", "}"} for token in tokens):
         return False
-    shell_control = {"|", "||", "&&", ";", "&", "(", ")", "{", "}"}
-    if any(token in shell_control for token in tokens):
+    if any(token != "|" and re.search(r"[|&;<>()[\]{}]", token) for token in tokens[1:]):
         return False
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token == "|":
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    if any(not segment for segment in segments):
+        return False
+    return all(readonly_pipeline_segment(segment, index == 0) for index, segment in enumerate(segments))
+
+
+def readonly_pipeline_segment(tokens: list[str], first: bool) -> bool:
     command = Path(tokens[0]).name
-    read_commands = {
+    first_segment_read_commands = {
         "cat",
         "head",
         "tail",
@@ -5242,17 +6442,39 @@ def command_reads_protected_ledger(tokens: list[str]) -> bool:
         "file",
         "grep",
         "rg",
-        "sed",
-        "cut",
-        "less",
-        "more",
         "nl",
     }
-    if command == "sed" and any(token == "-i" or token.startswith("-i") or token == "--in-place" or token.startswith("--in-place=") for token in tokens[1:]):
-        return False
+    filter_commands = {
+        "sort",
+        "uniq",
+        "wc",
+    }
     if command == "git":
-        return len(tokens) >= 2 and tokens[1] == "check-ignore"
-    return command in read_commands
+        return first and len(tokens) >= 2 and tokens[1] == "check-ignore"
+    if first:
+        return command in first_segment_read_commands
+    if command not in filter_commands:
+        return False
+    if any(protected_ledger_candidate(token) for token in tokens):
+        return False
+    if not stdout_only_filter_segment(command, tokens[1:]):
+        return False
+    return True
+
+
+def stdout_only_filter_segment(command: str, args: list[str]) -> bool:
+    disallowed_exact = {"-o", "--output", "--files0-from"}
+    disallowed_prefixes = ("--output=", "--files0-from=")
+    for arg in args:
+        if arg == "--":
+            return False
+        if arg in disallowed_exact or any(arg.startswith(prefix) for prefix in disallowed_prefixes):
+            return False
+        if command == "sort" and arg.startswith("-o"):
+            return False
+        if not arg.startswith("-"):
+            return False
+    return True
 
 
 def command_touches_protected_ledger(tokens: list[str]) -> bool:
@@ -5288,6 +6510,8 @@ def hook_pre_tool_use(args: argparse.Namespace, payload: dict[str, Any]) -> int:
             continue
         binding = mobius_path_binding(candidate, root)
         if binding is None:
+            if protected_ledger_candidate(candidate):
+                return hook_block("mobius:state-write-blocked: protected Mobius ledger path is protected state; use Mobius CLI commands")
             continue
         filename = str(binding["filename"])
         path = Path(binding["goal_dir"]) / filename if filename else Path(binding["goal_dir"])
@@ -5295,6 +6519,8 @@ def hook_pre_tool_use(args: argparse.Namespace, payload: dict[str, Any]) -> int:
             return hook_block(f"mobius:state-write-blocked:{path}: verdict.csv is derived state; use Mobius recorded review or verdict-compute")
         if filename:
             return hook_block(f"mobius:state-write-blocked:{path}: {filename} is protected state; use Mobius CLI commands")
+        if protected_ledger_candidate(candidate):
+            return hook_block(f"mobius:state-write-blocked:{path}: protected Mobius ledger path is protected state; use Mobius CLI commands")
     return 0
 
 
@@ -5453,6 +6679,13 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--created-by", default="main_agent")
     evidence.set_defaults(func=cmd_evidence_add)
 
+    evidence_list = sub.add_parser("evidence-list")
+    evidence_list.add_argument("--session-id", required=True)
+    evidence_list.add_argument("--goal-slug", required=True)
+    evidence_list.add_argument("--acceptance-id")
+    evidence_list.add_argument("--currentness", choices=["all", "current", "stale", "missing", "invalid", "not_applicable"], default="all")
+    evidence_list.set_defaults(func=cmd_evidence_list)
+
     validate = sub.add_parser("contract-validate")
     validate.add_argument("--session-id")
     validate.add_argument("--goal-slug")
@@ -5500,6 +6733,14 @@ def build_parser() -> argparse.ArgumentParser:
     loop_start.add_argument("--status", choices=sorted(PUBLIC_LOOP_START_STATUSES), default="running")
     loop_start.set_defaults(func=cmd_loop_start_stage)
 
+    loop_reopen = sub.add_parser("loop-reopen-stage")
+    loop_reopen.add_argument("--session-id", required=True)
+    loop_reopen.add_argument("--goal-slug", required=True)
+    loop_reopen.add_argument("--plan-item-id", required=True)
+    loop_reopen.add_argument("--from-cv-id", required=True)
+    loop_reopen.add_argument("--reason", required=True)
+    loop_reopen.set_defaults(func=cmd_loop_reopen_stage)
+
     cont = sub.add_parser("continue")
     cont.add_argument("--session-id", required=True)
     cont.add_argument("--goal-slug", required=True)
@@ -5512,6 +6753,9 @@ def build_parser() -> argparse.ArgumentParser:
     explain.add_argument("--session-id", required=True)
     explain.add_argument("--goal-slug", required=True)
     explain.set_defaults(func=cmd_explain)
+
+    doctor = sub.add_parser("doctor")
+    doctor.set_defaults(func=cmd_doctor)
 
     hook_health = sub.add_parser("hook-health")
     hook_health.set_defaults(func=cmd_hook_health)

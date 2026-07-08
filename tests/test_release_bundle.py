@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -97,7 +100,7 @@ def test_plugin_manifest_marketplace_mcp_and_hooks_shape() -> None:
 
     manifest = read_json(PLUGIN_ROOT / ".codex-plugin/plugin.json")
     assert manifest.get("name") == "mobius"
-    assert manifest.get("version") == "0.3.0"
+    assert manifest.get("version") == "0.4.0"
     assert manifest.get("license") == "Apache-2.0"
     assert manifest.get("skills") == "./skills/"
     assert manifest.get("mcpServers") == "./.mcp.json"
@@ -125,7 +128,18 @@ def test_plugin_manifest_marketplace_mcp_and_hooks_shape() -> None:
     for event in ("PreToolUse", "Stop"):
         entries = hooks.get(event)
         assert isinstance(entries, list) and entries
-        assert "mobius_hook_launcher.sh" in json.dumps(entries)
+        rendered = json.dumps(entries)
+        assert "mobius_hook_launcher.sh" in rendered
+        assert "PLUGIN_ROOT missing" in rendered
+        command = entries[0]["hooks"][0]["command"]
+        assert "scripts/mobius.py" not in command
+        assert "hook-corrupt-install" not in command
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["PLUGIN_ROOT"] = str(Path(tmp) / ".codex" / "plugins" / "cache" / "mobius" / "mobius" / "0.4.0")
+            stale = subprocess.run(command, input="{}", text=True, shell=True, executable="/bin/bash", capture_output=True, env=env, check=False)
+        assert stale.returncode == 0
+        assert "hook-unavailable: installed plugin cache missing" in stale.stderr
 
     marketplace = read_json(REPO_ROOT / ".agents/plugins/marketplace.json")
     plugins = marketplace.get("plugins")
@@ -147,6 +161,50 @@ def test_plugin_manifest_marketplace_mcp_and_hooks_shape() -> None:
     assert isinstance(policy, dict)
     assert policy.get("installation") == "AVAILABLE"
     assert policy.get("authentication") == "ON_INSTALL"
+
+
+def test_plugin_bundle_exposes_doctor_and_explicit_skill_activation() -> None:
+    uv_path = shutil.which("uv")
+    assert uv_path, "uv is required for the MobiusCV doctor readiness check"
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["MOBIUS_CV_UV"] = uv_path
+    result = subprocess.run(
+        ["python3", str(PLUGIN_ROOT / "scripts/mobius.py"), "doctor"],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "doctor"
+    assert payload["hooks"]["status"] in {"active", "inactive", "stale_cache_path", "unsupported_platform"}
+    assert payload["mcp"]["uv_required"] is True
+    if payload["platform"]["status"] == "supported":
+        assert result.returncode == 0
+        assert payload["mcp"]["start_ready"] is True
+        assert payload["mcp"]["self_check"]["status"] == "ready"
+
+    bad_env = {**env, "MOBIUS_CV_UV": "/bin/false"}
+    bad_result = subprocess.run(
+        ["python3", str(PLUGIN_ROOT / "scripts/mobius.py"), "doctor"],
+        text=True,
+        capture_output=True,
+        env=bad_env,
+        check=False,
+    )
+    bad_payload = json.loads(bad_result.stdout)
+    assert bad_result.returncode == 2
+    assert bad_payload["mcp"]["start_ready"] is False
+    assert any("MobiusCV MCP self-check failed" in error for error in bad_payload["errors"])
+
+    plan_skill = (PLUGIN_ROOT / "skills/mobius-plan/SKILL.md").read_text(encoding="utf-8")
+    loop_skill = (PLUGIN_ROOT / "skills/mobius-loop/SKILL.md").read_text(encoding="utf-8")
+    for text in (plan_skill, loop_skill):
+        assert "Use this skill only" in text
+        assert "ordinary" in text
+        assert "retry_limit" not in text
+        assert "<goal_slug returned by goal-start>" in text
 
 
 def test_release_text_has_no_forbidden_local_or_stale_tokens() -> None:

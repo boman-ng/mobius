@@ -6,11 +6,17 @@ description: "Create, validate, and lock an explicit Mobius goal contract. Use o
 # Mobius Plan
 
 Use this skill only when the user explicitly asks for Mobius or provides an existing Mobius goal
-target. The planning path is programic: create the goal, add executable stage contracts, validate,
-then lock. Do not hand-edit CSV files in the normal workflow.
+target. Do not use it for ordinary planning, todo lists, implementation plans, or review checklists
+that are not explicitly Mobius goals. The planning path is programic: create the goal, add
+executable stage contracts, validate, then lock. Do not hand-edit CSV files in the normal workflow.
 
 Planning creates the explicit `session_id + goal_slug` state that Mobius hooks can protect. Hooks
 stay no-op for ordinary work and do not replace this planning path.
+
+Review Contract View is not planning state. It is a derived `packet-read`/prompt guide built later
+from `goal.md`, `plan.csv`, `acceptance.csv`, evidence refs, packets, CV policy, loop state, and
+verdict state. Do not create a separate RCL file, duplicate acceptance matrix, alternate verdict
+rule, or compatibility prompt path during planning.
 
 ## Skill/MCP/CLI/Hook Responsibility Boundary
 
@@ -107,7 +113,7 @@ When helpful, make `review_focus` entries structured objects instead of generic 
 ```bash
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> contract-add-stage \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug> \
+  --goal-slug <goal_slug returned by goal-start> \
   --id P1 \
   --title "<stage title>" \
   --description "<verifiable implementation scope>" \
@@ -116,7 +122,7 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> con
   --work-json '{"target_refs":["src/**"],"deliverables":["implemented behavior"],"deleted_paths":[]}' \
   --gate-json '{"entry":["contract locked"],"exit":["tests pass"],"verifiers":["command_result","mobiuscv_delta"],"review_focus":[{"question":"Does evidence satisfy the user outcome rather than a process proxy?","blind_spot":"process metric passes while behavior regresses","counterevidence":"user-facing behavior or boundary test fails","expected_signal":"command_result or test_result covers the boundary"}]}' \
   --recovery-json '{"rollback_boundary":"revert stage files","restart_rule":"restart selected stage","escalation_rule":"surface blocker"}' \
-  --budget-json '{"retry_limit":2,"max_stage_attempts":3,"stop_condition":"loop reports accepted, terminal blocked, agent_must_stop, unavailable required reviewer/tool, or explicit user interruption"}' \
+  --budget-json '{"max_stage_attempts":3,"stop_condition":"loop reports accepted, terminal blocked, agent_must_stop, unavailable required reviewer/tool, or explicit user interruption"}' \
   --acceptance-json '[{"id":"A1","requirement":"Tests pass","observable_outcome":"test command exits 0","evidence_required":[{"type":"command_result","name":"test command","exit_code":0}],"verifier":[{"type":"command_result","name":"test command"},{"type":"mobiuscv_delta"}],"review_focus":[{"question":"What would falsify this passing claim?","blind_spot":"only the happy path was tested","counterevidence":"test command exits nonzero or omits the changed boundary","expected_signal":"command_result exit_code 0 and relevant test coverage"}],"required":true}]'
 ```
 
@@ -130,11 +136,11 @@ review policy.
 ```bash
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> contract-validate \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug>
+  --goal-slug <goal_slug returned by goal-start>
 
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> contract-lock \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug> \
+  --goal-slug <goal_slug returned by goal-start> \
   --locked-by main_agent
 ```
 

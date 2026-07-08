@@ -5,10 +5,11 @@ description: "Run one locked Mobius goal through programic stage gates and recor
 
 # Mobius Loop
 
-Use this skill only for a locked, explicitly targeted Mobius goal. By default, run the full locked
-plan as a loop until Mobius reaches a terminal gate or a real stop condition. Each iteration
-still executes exactly one stage contract, but a passed stage is not a stopping point; immediately
-call `continue` again and consume the next `loop.next_required_action`.
+Use this skill only for a locked, explicitly targeted Mobius goal. Do not use it for ordinary
+Codex tasks, ad hoc implementation loops, or non-Mobius review gates. By default, run the full
+locked plan as a loop until Mobius reaches a terminal gate or a real stop condition. Each
+iteration still executes exactly one stage contract, but a passed stage is not a stopping point;
+immediately call `continue` again and consume the next `loop.next_required_action`.
 
 Use one-stage mode only when the user explicitly asks for exactly one stage, a dry run, a status
 check, or a pause after the current gate. The normal `$mobius-loop <goal>` experience is full-plan
@@ -36,19 +37,19 @@ never advance loop state, run reviewers, or accept a goal.
 ```bash
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> explain \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug>
+  --goal-slug <goal_slug returned by goal-start>
 
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> loop-status \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug>
+  --goal-slug <goal_slug returned by goal-start>
 
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> ledger-audit \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug>
+  --goal-slug <goal_slug returned by goal-start>
 
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> continue \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug>
+  --goal-slug <goal_slug returned by goal-start>
 ```
 
 3. Treat `loop` as the loop controller:
@@ -83,7 +84,7 @@ confirmation gate and not a second controller.
 ```bash
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> loop-start-stage \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug> \
+  --goal-slug <goal_slug returned by goal-start> \
   --plan-item-id <P1>
 ```
 
@@ -96,7 +97,7 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> loo
 ```bash
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> evidence-add \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug> \
+  --goal-slug <goal_slug returned by goal-start> \
   --type command_result \
   --summary "<what the evidence proves>" \
   --supports <A1> \
@@ -112,7 +113,7 @@ and scope claims:
 ```bash
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> evidence-add \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug> \
+  --goal-slug <goal_slug returned by goal-start> \
   --type change_set_scope \
   --summary "<what scope was checked>" \
   --supports <A1> \
@@ -120,6 +121,30 @@ python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> evi
 ```
 
 Do not copy command output, diff output, or file contents into the packet.
+
+Use `evidence-list` whenever `continue`, `packet-create`, or `packet-read` reports
+`refresh_final_evidence`; it is read-only and returns currentness diagnostics plus templates:
+
+```bash
+python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> evidence-list \
+  --session-id <codex-session-id> \
+  --goal-slug <goal_slug returned by goal-start> \
+  --acceptance-id <A1>
+```
+
+For final `command_result` or `test_result` evidence, use `validity_scope=final` and include
+auditable run metadata: `argv`, project-root-relative `cwd`, `started_at`, `finished_at`,
+integer `duration_ms`, `exit_code`, and at least one stdout/stderr/log ref or hash:
+
+```bash
+python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> evidence-add \
+  --session-id <codex-session-id> \
+  --goal-slug <goal_slug returned by goal-start> \
+  --type command_result \
+  --summary "final command evidence for A1" \
+  --supports <A1> \
+  --artifact-json '{"type":"command_result","name":"<command name>","command":"<command>","argv":["<command>"],"cwd":".","exit_code":0,"started_at":"<ISO-8601>","finished_at":"<ISO-8601>","duration_ms":0,"log_sha256":"sha256:<64 hex>","validity_scope":"final"}'
+```
 
 MobiusCV review is a verifier, not evidence. If a stage needs review to confirm an absence claim,
 such as "no business behavior was added", first record `change_set_scope` evidence, then use the
@@ -130,7 +155,7 @@ delta review gate. Packet refs are starting points for reviewer judgment, not ex
 ```bash
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> packet-create \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug> \
+  --goal-slug <goal_slug returned by goal-start> \
   --review-mode delta_review \
   --acceptance-id <A1>
 ```
@@ -143,8 +168,11 @@ rerun, create a new packet from the current Mobius ledgers. Do not reuse a previ
    - `mobius_cv_build_subagent_prompt` to build the host subagent prompt from the packet JSON.
    - Run the host Codex subagent with that prompt and pass its raw stateless result back.
    - `mobius_cv_record_delta_review` to persist the stage review. Delta review defaults to
-     `delta_light` with the host subagent only; use level 2 or `input_refs.review_policy` named
-     `delta_kimi` when the stage needs the external Kimi reviewer.
+     `delta_light` with the host subagent only for low-risk stages. Use level 2 or
+     `input_refs.review_policy` named `delta_kimi` when the stage needs the external Kimi reviewer.
+     If the locked review focus names high-risk areas such as hidden behavior, security,
+     architecture boundaries, absence claims, pruning, Goodhart, or proxy evidence, Mobius requires
+     `delta_kimi` unless the locked gate records an explicit lower-policy reason.
    - Close the completed host subagent after the review is recorded or after a record/persistence
      failure is visible. The normal lifecycle is spawn, wait, record, then close; timeouts,
      blocked reviews, and persistence errors still require close.
@@ -171,15 +199,24 @@ rerun, create a new packet from the current Mobius ledgers. Do not reuse a previ
 ```bash
 python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> packet-read \
   --session-id <codex-session-id> \
-  --goal-slug <yyyy-mm-dd-goal-slug> \
+  --goal-slug <goal_slug returned by goal-start> \
   --review-mode exit_review \
   --packet-id <packet_exit_001>
 ```
 
+`packet-read` also returns `review_contract_view`, a generated review-time guide that freezes the
+target id, relation label, claim/non-claim boundary, compact evidence refs, acceptance/falsifier
+matrix, policy, terminal note, and expected MobiusCV output contract. Treat it as derived and
+non-authoritative: do not edit it, persist it as a new contract, or use it instead of the packet and
+CSV ledgers. MobiusCV still requires `MOBIUS_CV_REVIEWER_RESULT`; CrossReview packets still require
+`CROSS_REVIEW_RESULT_V1`.
+
 12. If an exit review records repairable feedback, immediately call `continue`. Repairable exit
-    `fail` routes the affected stage back through normal repair work. Repairable exit `blocked`
-    routes to `refresh_final_evidence`, `record_missing_evidence`, `run_missing_command_evidence`,
-    or `create_new_packet` without making the goal terminal.
+    `fail` routes to `loop_reopen_stage`; execute the returned `loop.next_argv` so the affected
+    passed stage reopens explicitly with the exit CV id and reason, then repair and run a fresh
+    delta review. Repairable exit `blocked` routes to `refresh_final_evidence`,
+    `record_missing_evidence`, `run_missing_command_evidence`, or `create_new_packet` without
+    making the goal terminal.
 13. Completion is allowed only when the recorded exit result returns `gate=accepted`.
 14. Stop only when the goal is `accepted`, the loop reports a true terminal `blocked`, or
     `loop.agent_must_stop=true`.
