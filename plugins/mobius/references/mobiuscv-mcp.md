@@ -12,6 +12,9 @@ targeted Mobius goal.
 - The packet is a frozen local ledger and evidence-reference index, not a full evidence archive.
 - Reviewers start from `packet.ledger`, `packet.coverage`, and `packet.refs`. Refs are starting
   points for auditing claims, not exclusive evidence and not proof by themselves.
+- `review_contract_view`, when supplied by `packet-read` or generated for a prompt, is a derived
+  guide only. It is not stored as a ledger, not a packet schema, not an acceptance matrix source, and
+  not a verdict engine.
 - Prior review chat is not scope for a new review.
 - `delta_review` gates one stage only and checks that stage's scope, work, gate, recovery, budget,
   linked acceptance rows, proof obligations, and evidence.
@@ -42,9 +45,12 @@ delta_kimi: delta_review, level 2, required reviewers codex-subagent and kimi-co
 exit_strict: exit_review, level 2, required reviewers codex-subagent and kimi-code
 ```
 
-`mobius_cv_record_delta_review` defaults to `delta_light` for speed on ordinary stage gates.
-Callers may request level 2 or pass `input_refs.review_policy={"name":"delta_kimi"}` when a stage
-needs the external Kimi reviewer. `mobius_cv_record_exit_review` always uses `exit_strict`.
+`mobius_cv_record_delta_review` defaults to `delta_light` for speed on ordinary low-risk stage
+gates. Callers may request level 2 or pass `input_refs.review_policy={"name":"delta_kimi"}` when a
+stage needs the external Kimi reviewer. If the locked `review_focus` names high-risk areas such as
+hidden behavior, security, architecture boundaries, absence claims, pruning, Goodhart, or proxy
+evidence, Mobius requires `delta_kimi` unless the locked gate records an explicit lower-policy
+reason. `mobius_cv_record_exit_review` always uses `exit_strict`.
 
 Pass aggregation is derived from the canonical policy recorded in `input_refs.review_policy`. A pass
 requires all policy-required reviewers to complete with pass, full required-acceptance coverage, no
@@ -75,16 +81,18 @@ recorded as failed `review_attempts.csv` attempts with `failure_kind`, `retryabl
 to `retry_review`; non-retryable reviewer infrastructure failures stop at `fix_reviewer_infra`.
 
 An exit review `fail` with checked active acceptance ids is repair input. The CLI routes the
-earliest affected stage back to `running`; it does not turn ordinary repairable exit feedback into
-a terminal blocked goal.
+earliest affected stage to `loop_reopen_stage`; the stage moves back to `running` only through
+`loop-reopen-stage --from-cv-id ... --reason ...`. It does not turn ordinary repairable exit
+feedback into a terminal blocked goal or silently restart a passed stage.
 
-An exit review `blocked` is classified before terminal state is written. Stale `file_ref` hashes,
-final command/test evidence that predates current source changes, stale packet refs, missing final
-evidence, generated Python artifacts, and similar mechanical final-state problems are
-`repairable_blocked`; Mobius keeps the goal active and routes the loop to `refresh_final_evidence`
-or fresh exit packet creation. Review findings prefixed with `contract_change_required:` route to
-contract repair without writing terminal `blocked`. Only true terminal blockers write terminal
-`blocked`.
+An exit review `blocked` is classified before terminal state is written. Mobius-generated
+final-state diagnostics for stale `file_ref` hashes, final command/test evidence that predates
+current source changes, stale packet refs, missing final evidence, generated Python artifacts, and
+similar mechanical final-state problems are `repairable_blocked`; Mobius keeps the goal active and
+routes the loop to `refresh_final_evidence` or fresh exit packet creation. General reviewer prose
+does not become repairable merely by naming an evidence type. Review findings prefixed with
+`contract_change_required:` route to contract repair without writing terminal `blocked`. Only true
+terminal blockers write terminal `blocked`.
 
 The MCP cannot directly invoke the current Codex host subagent. Use
 `mobius_cv_build_subagent_prompt`, run the host subagent with that prompt, then pass the structured
@@ -222,6 +230,17 @@ Review prompts require reviewers to inspect `scope_json`, `work_json`, `gate_jso
 and `review_focus_json` from the indexed CSV files. MobiusCV does not copy those contract fields
 into `cv.csv`.
 
+`packet-read` returns a derived `review_contract_view` plus a reviewer checklist. The view freezes
+the review target id, relation label, claim/non-claim boundary, compact evidence refs,
+acceptance/falsifier matrix, selected policy, terminal-state note, and MobiusCV output contract for
+the current packet. The checklist restates each checked acceptance id, required evidence, packet
+coverage ids, ref ids, and core disconfirmation questions. Reviewers should treat both as audit
+guides, not as substitutes for inspecting the packet and local ledger refs.
+
+MobiusCV prompts may include this derived view, but the required reviewer result block remains
+`MOBIUS_CV_REVIEWER_RESULT`. Missing or invalid view text cannot turn a failed packet, stale refs,
+unchecked acceptance ids, or degraded reviewer output into pass.
+
 ## Packet Input
 
 Pass a JSON object:
@@ -271,13 +290,13 @@ reported by `packet-read`; do not create a replacement packet unless the loop re
   "review_mode": "delta_review",
   "gate": "awaiting_exit_review",
   "updated_files": ["cv.csv", "loop.csv", "verdict.csv"],
-  "next_required_action": "create_exit_packet",
+  "next_required_action": "refresh_final_evidence",
   "loop": {
     "schema": "mobius.loop",
     "agent_must_continue": true,
     "agent_must_stop": false,
-    "next_required_action": "create_exit_packet",
-    "next_command": "packet-create --review-mode exit_review",
+    "next_required_action": "refresh_final_evidence",
+    "next_command": "evidence-add",
     "packet_id": "",
     "review_mode": "exit_review"
   },
@@ -286,7 +305,8 @@ reported by `packet-read`; do not create a replacement packet unless the loop re
 }
 ```
 
-`mobius_cv_record_delta_review` may update `cv.csv` and `loop.csv`.
+`mobius_cv_record_delta_review` may update `cv.csv`, `acceptance.csv` delta fields, `loop.csv`,
+and `verdict.csv`. It never writes final acceptance `status`.
 `mobius_cv_record_exit_review` may update `cv.csv`, `acceptance.csv`, and `verdict.csv`.
 Those writes are staged and committed together by Mobius; failed commands must not leave partial
 review state.

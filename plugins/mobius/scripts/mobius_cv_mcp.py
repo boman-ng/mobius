@@ -29,7 +29,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import mobius
 
 
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 RESULT_SCHEMA = "mobius.cv_result"
 REVIEWER_SCHEMA = "mobius.cv_reviewer_result"
 VALID_REVIEW_MODES = {"delta_review", "exit_review"}
@@ -388,6 +388,15 @@ def load_packet(packet: dict[str, Any] | None) -> tuple[dict[str, Any] | None, s
     return packet, packet_envelope_json(packet), []
 
 
+def review_contract_view_from_input(packet: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(packet, dict):
+        return None
+    view = packet.get("review_contract_view")
+    if isinstance(view, dict):
+        return view
+    return None
+
+
 def extract_required_acceptance_ids(packet: dict[str, Any] | None, explicit: list[str] | None) -> list[str]:
     if isinstance(explicit, list):
         return [str(item) for item in explicit]
@@ -520,12 +529,27 @@ review object of record.
 """
 
 
+def review_contract_view_block(review_contract_view: dict[str, Any] | None) -> str:
+    if not isinstance(review_contract_view, dict):
+        return ""
+    return f"""
+Derived review contract view:
+```json
+{json.dumps(review_contract_view, ensure_ascii=False, sort_keys=True, indent=2)}
+```
+This view is generated from Mobius ledgers and the frozen packet. It is not a ledger, packet schema,
+verdict engine, or acceptance source. If it conflicts with the indexed packet or local ledgers, use
+the packet/ledgers as authoritative evidence and return unknown or blocked rather than pass.
+"""
+
+
 def review_prompt(
     packet_json: str,
     review_mode: str,
     required_ids: list[str],
     reviewer: str,
     context: dict[str, Any] | None = None,
+    review_contract_view: dict[str, Any] | None = None,
 ) -> str:
     scope = (
         "Exit review: inspect the full frozen index from scratch, including the required plan DAG and full acceptance matrix."
@@ -585,6 +609,7 @@ Frozen Mobius packet JSON:
 ```json
 {packet_json}
 ```
+{review_contract_view_block(review_contract_view)}
 {reviewer_context_block(context)}
 
 Self-check before returning:
@@ -902,6 +927,7 @@ def run_kimi_review(
     required_ids: list[str],
     timeout_seconds: int,
     context: dict[str, Any] | None = None,
+    review_contract_view: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     binary = shutil.which("kimi")
     if not binary:
@@ -949,7 +975,7 @@ def run_kimi_review(
             "; ".join(workspace_errors),
             retryable=False,
         )
-    prompt = review_prompt(packet_json, review_mode, required_ids, "kimi-code", context)
+    prompt = review_prompt(packet_json, review_mode, required_ids, "kimi-code", context, review_contract_view)
     hard_timeout = int(timeout_seconds or KIMI_HARD_TIMEOUT_SECONDS)
     first_event_timeout = min(KIMI_FIRST_EVENT_TIMEOUT_SECONDS, hard_timeout)
     activity_idle_timeout = min(KIMI_ACTIVITY_IDLE_TIMEOUT_SECONDS, hard_timeout)
@@ -1000,6 +1026,7 @@ def build_cv_result(
     input_refs: dict[str, Any] | None,
     goal_id: str,
     packet_id: str,
+    review_contract_view: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     refs = dict(input_refs or {})
     policy = mobius.review_gate_policy(review_mode, refs.get("review_policy") or {"level": level})
@@ -1008,7 +1035,7 @@ def build_cv_result(
     reviewers.append(normalize_reviewer_result(codex_subagent_result, "codex-subagent", review_mode, required_ids))
 
     if "kimi-code" in policy["required_reviewers"]:
-        reviewers.append(run_kimi_review(packet_json, review_mode, required_ids, timeout_seconds, refs))
+        reviewers.append(run_kimi_review(packet_json, review_mode, required_ids, timeout_seconds, refs, review_contract_view))
 
     comparison = mobius.derive_cv_aggregate(reviewers, required_ids, review_mode, policy)
     suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -1129,6 +1156,7 @@ def review_and_record(
 ) -> dict[str, Any]:
     if level not in VALID_LEVELS:
         return recorded_error(review_mode, f"invalid level: {level}")
+    input_review_contract_view = review_contract_view_from_input(packet)
     loaded_packet, loaded_text, errors = load_packet(packet)
     if errors:
         return recorded_error(review_mode, "; ".join(errors))
@@ -1169,13 +1197,35 @@ def review_and_record(
     if codex_subagent_result is None:
         return recorded_error(review_mode, missing_codex_subagent_result_error(), cv_result=loaded_packet)
     goal_state = mobius.read_single_csv(goal_dir / "goal.csv") or {}
+    review_allowed_for_view = not mobius.packet_has_recorded_review(goal_dir, str((loaded_packet or {}).get("packet", "")))
+    review_contract_view = input_review_contract_view
+    if review_contract_view is None:
+        try:
+            review_contract_view = mobius.review_contract_view(
+                goal_dir,
+                loaded_packet or {},
+                review_mode,
+                [str(item) for item in ids],
+                review_allowed=review_allowed_for_view,
+            )
+        except mobius.MobiusError:
+            review_contract_view = None
     refs = dict(input_refs or {})
     refs.setdefault("project_root", str(root))
     refs.setdefault("ledger_abs_root", str(goal_dir))
     refs.setdefault("ledger_root", str((loaded_packet or {}).get("ledger", {}).get("root", "")))
     refs.setdefault("goal_slug", goal_slug)
     refs.setdefault("session_id", session_id)
-    policy = mobius.review_gate_policy(review_mode, refs.get("review_policy") or {"level": level})
+    if review_mode == "delta_review" and target_plan_item_id:
+        policy = mobius.review_policy_for_delta_targets(
+            goal_dir,
+            target_plan_item_id,
+            [str(item) for item in ids],
+            refs.get("review_policy") or {"level": level},
+            level=level,
+        )
+    else:
+        policy = mobius.review_gate_policy(review_mode, refs.get("review_policy") or {"level": level})
     refs["review_policy"] = policy
     refs.setdefault("review_workspace", reviewer_workspace_context(root, goal_dir, loaded_packet))
     if review_mode == "exit_review":
@@ -1200,6 +1250,7 @@ def review_and_record(
             refs,
             str(goal_state.get("goal_id", "")),
             packet_id,
+            review_contract_view,
         )
         infra_failures = reviewer_infra_failures(cv_result)
         if infra_failures:
@@ -1339,11 +1390,12 @@ def mobius_cv_build_subagent_prompt(
     if loaded_packet is None:
         return {"schema": "mobius.cv_error", "ok": False, "error": "packet JSON object is required"}
     required_ids = extract_required_acceptance_ids(loaded_packet, required_acceptance_ids)
+    review_contract_view = review_contract_view_from_input(packet)
     return {
         "schema": "mobius.cv_subagent_prompt",
         "review_mode": review_mode,
         "stateless": True,
-        "prompt": review_prompt(loaded_text, review_mode, required_ids, "codex-subagent"),
+        "prompt": review_prompt(loaded_text, review_mode, required_ids, "codex-subagent", review_contract_view=review_contract_view),
         "expected_result_schema": REVIEWER_SCHEMA,
     }
 
