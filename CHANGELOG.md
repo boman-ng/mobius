@@ -2,6 +2,19 @@
 
 All notable changes to Mobius are documented here.
 
+## 0.4.0 - 2026-07-08
+
+- Add a derived Review Contract View to `packet-read` and MobiusCV prompts so reviewers share a
+  consistent, non-authoritative review boundary without adding another source of truth.
+- Harden final evidence gates with explicit final-scoped evidence, currentness diagnostics,
+  change-set coverage checks, and refresh templates before strict exit review.
+- Separate delta and exit review policy behavior, including high-risk delta Kimi escalation and
+  explicit reopen semantics for passed stages.
+- Add hook and doctor diagnostics for installed-plugin health, protected ledger reads, and
+  restricted read pipelines.
+- Expand regression and release-bundle coverage for the revised loop, evidence, hook, MobiusCV,
+  and release contracts.
+
 ## 0.3.0 - 2026-07-07
 
 - Add agentic Mobius plan and loop guidance grounded in first-principles framing, stage control

@@ -1,6 +1,6 @@
 # Release Checklist
 
-Use this checklist before tagging `v0.3.0`.
+Use this checklist before tagging `v0.4.0`.
 
 ## Verify
 
@@ -23,7 +23,7 @@ ledger state should appear, and all release files should be intentionally staged
 
 ## Review Release Contents
 
-- Confirm `plugins/mobius/.codex-plugin/plugin.json` has version `0.3.0`, repository metadata,
+- Confirm `plugins/mobius/.codex-plugin/plugin.json` has version `0.4.0`, repository metadata,
   `Apache-2.0` license metadata, `./skills/`, and `./.mcp.json`.
 - Confirm `.agents/plugins/marketplace.json` points to `./plugins/mobius` with installation
   `AVAILABLE` and authentication `ON_INSTALL`.
@@ -52,8 +52,8 @@ ledger state should appear, and all release files should be intentionally staged
 ## Tag
 
 ```bash
-git tag -a v0.3.0 -m "Mobius v0.3.0"
-git push origin v0.3.0
+git tag -a v0.4.0 -m "Mobius v0.4.0"
+git push origin v0.4.0
 ```
 
 ## Install Or Refresh
@@ -61,7 +61,7 @@ git push origin v0.3.0
 Install from the pinned tag:
 
 ```bash
-codex plugin marketplace add boman-ng/mobius --ref v0.3.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
+codex plugin marketplace add boman-ng/mobius --ref v0.4.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
 codex plugin add mobius@mobius
 ```
 
