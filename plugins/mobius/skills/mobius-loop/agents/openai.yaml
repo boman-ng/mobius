@@ -1,11 +1,11 @@
 interface:
   display_name: "Mobius Loop"
-  short_description: "Run a locked Mobius goal through the full plan loop."
-  default_prompt: "Run the full locked Mobius plan loop until accepted, terminal blocked, or a real stop gate."
+  short_description: "Run a locked Mobius Objective through the full loop."
+  default_prompt: "Run the full locked Mobius Objective until accepted, blocked, or a real stop gate."
 
 dependencies:
   tools:
     - type: "mcp"
-      value: "mobius-cv"
-      description: "MobiusCV recorded review MCP server"
+      value: "mobius-review"
+      description: "Mobius Review recorded judgment MCP server"
       transport: "stdio"
