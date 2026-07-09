@@ -12,8 +12,8 @@ skill content, marketplace metadata, or runtime policy after installation.
 - Skills: `plugins/mobius/skills/mobius-plan/SKILL.md` and
   `plugins/mobius/skills/mobius-loop/SKILL.md`.
 - Local state engine and hook health: `plugins/mobius/scripts/mobius.py`.
-- MobiusCV MCP server and launcher: `plugins/mobius/scripts/mobius_cv_mcp.py` and
-  `plugins/mobius/scripts/mobius_cv_mcp_server.sh`.
+- Mobius Review MCP server and launcher: `plugins/mobius/scripts/mobius_review_mcp.py` and
+  `plugins/mobius/scripts/mobius_review_mcp_server.sh`.
 - Hook launcher and hook definitions: `plugins/mobius/scripts/mobius_hook_launcher.sh` and
   `plugins/mobius/hooks/hooks.json`.
 - Durable plugin references: `plugins/mobius/references/`.
@@ -26,9 +26,9 @@ skill content, marketplace metadata, or runtime policy after installation.
 
 ## Source Of Truth
 
-- `plugins/mobius/scripts/mobius.py` owns Mobius local ledger semantics, plan locking, stage
-  transitions, hook checks, and acceptance conditions.
-- `plugins/mobius/scripts/mobius_cv_mcp.py` owns the MobiusCV MCP contract and review recording
+- `plugins/mobius/scripts/mobius.py` owns Mobius local ledger semantics, contract locking, route
+  transitions, hook checks, and Criterion verification conditions.
+- `plugins/mobius/scripts/mobius_review_mcp.py` owns the Mobius Review MCP contract and review recording
   behavior.
 - `plugins/mobius/.codex-plugin/plugin.json` owns plugin identity, version, display metadata,
   skills path, and MCP entrypoint.
@@ -79,8 +79,8 @@ documentation in the same change when the public contract changes.
 
 | Change type | Required checks |
 |---|---|
-| Manifest, marketplace, hooks, MCP config, skills, scripts, or release docs | `PYTHONDONTWRITEBYTECODE=1 python -m pytest`; `PYTHONPYCACHEPREFIX="$(mktemp -d)" python -m py_compile plugins/mobius/scripts/mobius.py plugins/mobius/scripts/mobius_cv_mcp.py tests/mobius_regression_tests.py tests/test_release_bundle.py`; `PYTHONDONTWRITEBYTECODE=1 python plugins/mobius/scripts/mobius.py --project-root "$PWD" hook-health`; `git diff --check` |
-| Python script change | `PYTHONDONTWRITEBYTECODE=1 python -m pytest`; `PYTHONPYCACHEPREFIX="$(mktemp -d)" python -m py_compile plugins/mobius/scripts/mobius.py plugins/mobius/scripts/mobius_cv_mcp.py tests/mobius_regression_tests.py tests/test_release_bundle.py` |
+| Manifest, marketplace, hooks, MCP config, skills, scripts, or release docs | `PYTHONDONTWRITEBYTECODE=1 python -m pytest`; `PYTHONPYCACHEPREFIX="$(mktemp -d)" python -m py_compile plugins/mobius/scripts/mobius.py plugins/mobius/scripts/mobius_review_mcp.py tests/mobius_regression_tests.py tests/test_release_bundle.py`; `PYTHONDONTWRITEBYTECODE=1 python plugins/mobius/scripts/mobius.py --project-root "$PWD" hook-health`; `git diff --check` |
+| Python script change | `PYTHONDONTWRITEBYTECODE=1 python -m pytest`; `PYTHONPYCACHEPREFIX="$(mktemp -d)" python -m py_compile plugins/mobius/scripts/mobius.py plugins/mobius/scripts/mobius_review_mcp.py tests/mobius_regression_tests.py tests/test_release_bundle.py` |
 | Plugin manifest shape only | `PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_release_bundle.py` |
 | Documentation only | Review rendered Markdown when tables, links, or command blocks change; run `PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_release_bundle.py` when release commands, paths, or repository coordinates change |
 
