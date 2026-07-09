@@ -35,7 +35,7 @@ jobs:
         run: |
           python -m py_compile \
             plugins/mobius/scripts/mobius.py \
-            plugins/mobius/scripts/mobius_cv_mcp.py \
+            plugins/mobius/scripts/mobius_review_mcp.py \
             tests/mobius_regression_tests.py \
             tests/test_release_bundle.py
 
