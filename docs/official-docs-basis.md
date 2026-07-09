@@ -18,15 +18,15 @@ Mobius packaging follows the Codex plugin model described in official OpenAI Cod
 - Use a repository marketplace at `.agents/plugins/marketplace.json`.
 - Store the plugin at `plugins/mobius` with `.codex-plugin/plugin.json` as the required manifest.
 - Keep manifest component paths relative to the plugin root and prefixed with `./`.
-- Bundle the MobiusCV stdio MCP server through `mcpServers`.
+- Bundle the Mobius Review stdio MCP server through `mcpServers`.
 - Bundle lifecycle hooks under `hooks/hooks.json`; users still review and trust hooks in Codex.
 - Keep repository development guidance, local test ledgers, and `AGENTS.md` outside the installed
   plugin runtime contract.
 - Avoid claiming official public Plugin Directory publication. The official docs state self-serve
-  public plugin publishing is coming soon, so v0.4.0 targets GitHub repository marketplace
+  public plugin publishing is coming soon, so v0.5.0 targets GitHub repository marketplace
   distribution.
 
 ## Runtime Shape
 
-Mobius uses one validated bundled MCP shape: `plugin.json` points `mcpServers` at
-`plugins/mobius/.mcp.json`, and that file defines the `mobius-cv` stdio server.
+Mobius uses one bundled MCP shape: `plugin.json` points `mcpServers` at
+`plugins/mobius/.mcp.json`, and that file defines the `mobius-review` stdio server.
