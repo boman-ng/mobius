@@ -1,13 +1,9 @@
 {
-  "mcpServers": {
-    "mobius-review": {
-      "cwd": ".",
-      "command": "/bin/bash",
-      "args": [
-        "./scripts/mobius_review_mcp_server.sh"
-      ],
-      "startup_timeout_sec": 60,
-      "tool_timeout_sec": 1200
-    }
+  "mobius": {
+    "command": "./bin/mobius",
+    "args": [
+      "mcp"
+    ],
+    "cwd": "."
   }
 }
