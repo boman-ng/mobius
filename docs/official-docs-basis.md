@@ -8,6 +8,7 @@ The sources below were rechecked on 2026-07-16 before wiring the v1 package.
 - [Build plugins](https://learn.chatgpt.com/docs/build-plugins)
 - [Plugins overview](https://learn.chatgpt.com/docs/plugins)
 - [Build skills](https://learn.chatgpt.com/docs/build-skills)
+- [Subagents and custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents)
 - [Model Context Protocol](https://learn.chatgpt.com/docs/extend/mcp)
 - [Hooks](https://learn.chatgpt.com/docs/hooks.md)
 - [AGENTS.md guidance](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
@@ -24,13 +25,21 @@ The sources below were rechecked on 2026-07-16 before wiring the v1 package.
   direct `mobius` entry whose command is `./bin/mobius` and whose only argument is `mcp`.
 - Installed plugins may load `hooks/hooks.json` by default or through the manifest `hooks` field.
   Mobius uses the explicit relative field so the release contract is mechanically visible.
-- Plugin hook commands receive `PLUGIN_ROOT`; both Mobius hooks invoke
-  `${PLUGIN_ROOT}/bin/mobius` and select a hook mode. Users must still review and trust them.
+- Plugin hook commands receive `PLUGIN_ROOT` and the writable `PLUGIN_DATA`; all three Mobius hooks
+  invoke `${PLUGIN_ROOT}/bin/mobius` and select a hook mode. Users must still review and trust them.
+- A plugin `SessionStart` hook may add developer context, and exit `0` with no output is a silent
+  success. Mobius matches only `startup`, delivers its bounded Judge onboarding context once, stores
+  only an atomic one-shot claim in `PLUGIN_DATA`, and emits no output in losing concurrent or later
+  Sessions.
+- Codex custom agents are standalone user- or project-level TOML files. The user-level
+  `mobius-judge` file created by the one-time Agentic onboarding uses the documented custom-agent
+  configuration surface; Codex loads it for a later spawned Session.
 - Marketplace local source paths are relative to the marketplace root, and the install policy may
   be `NOT_AVAILABLE` or `AVAILABLE`.
 - Codex installs marketplace plugins into its plugin cache and runs the installed copy.
 - Package-registry plugin installs do not run lifecycle scripts. Mobius therefore has no valid
-  build-on-install path and ships a prebuilt target binary instead.
+  install-time execution point: the first trusted `SessionStart(startup)` is the earliest supported
+  onboarding boundary, and the plugin still ships a prebuilt target binary.
 - `mobius-copilot` and `mobius-loop` set `policy.allow_implicit_invocation: false`; the user must
   invoke either skill explicitly. Both declare the bundled `mobius` stdio MCP dependency.
 - `mobius-subagent` sets `policy.allow_implicit_invocation: true` and declares no Core dependency.
@@ -69,6 +78,9 @@ shape blocks release until this adapter and its tests are revalidated.
 - Only that assembled marketplace copy becomes `AVAILABLE`.
 - The installed plugin contains skills, manifest, MCP config, hook config, and exactly one
   executable at `plugins/mobius/bin/mobius`. Rust source and repository tooling stay outside it.
+- The SessionStart adapter does not implement provider discovery, HTTP, TOML editing, credentials,
+  or model selection in Rust. It delegates that one-time configuration task to the main Agent and
+  then leaves later Session startup paths silent.
 - Manifest, MCP config, and hook config describe one execution path. There is no Python runtime,
   shell launcher, downloader, sidecar, SQLite CLI dependency, second executable, or fallback.
 - A clean-cache test runs the copied executable with an empty environment and an unusable `PATH`,

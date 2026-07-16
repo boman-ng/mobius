@@ -91,17 +91,32 @@ Bundle and extracted-archive smoke tests also require the MCP initialize version
 installed plugin manifest version, preventing a stale runtime binary from passing under current
 release metadata.
 
+With isolated `PLUGIN_DATA`, start two installed `SessionStart(startup)` handlers concurrently.
+Exactly one must emit the bounded Agentic Judge-onboarding context, both must succeed without
+stderr, and they must create only `judge-onboarding-v1.claimed`; another call must return exit `0`
+with empty stdout and stderr. On a
+trusted native host with a controlled local CC-Switch configuration, let the first-session Agent
+complete that task, start a new Session, and confirm `mobius-judge` can be selected without a
+provider id, endpoint, port, or model brand being encoded in the plugin. An unavailable, ambiguous,
+or conflicting setup must preserve user configuration and be reported as such.
+
 Before release, use the native Subagent workflow with the installed `mobius-subagent` skill and
 record outcomes, not a copied Runtime ledger:
 
 1. Freeze the skill, selected role profile, task baseline, and every supplied material.
-2. Spawn a bounded Driver or Verifier without overriding model, provider, effort, sandbox, approval,
-   or permission settings. Exercise native wait, same-envelope follow-up, completion, and interrupt.
+2. Spawn a bounded Driver by inheriting the Main Agent model and reasoning effort, or a Verifier with
+   GPT-5.6 Luna / `high`; do not override provider, sandbox, approval, or permission settings. Exercise
+   native wait, same-envelope follow-up, completion, and interrupt.
 3. Preserve spawn, configuration, Runtime, and permission failures exactly. Do not retry through a
    custom worker, alternate transport, elevation, or success-shaped fallback.
-4. For the delegated Composition E2E, require both forbidden boundaries and the complete public
+4. When a different model-family perspective is required, spawn the same Judge contract through
+   the Host-configured `mobius-judge` custom agent. Keep frozen materials, questions, criteria,
+   role profile, and result contract identical. Require Runtime facts to establish a family other
+   than GPT-5.6; do not infer it from the agent name or provider, and do not substitute the default
+   Judge if this spawn fails or the family cannot be established.
+5. For the delegated Composition E2E, require both forbidden boundaries and the complete public
    result envelope. A malformed success-shaped result must be rejected before submit.
-5. Supply the validated task/result/opaque native identity transiently through
+6. Supply the validated task/result/opaque native identity transiently through
    `MOBIUS_NATIVE_TASK_JSON`, `MOBIUS_NATIVE_RESULT_JSON`, and
    `MOBIUS_NATIVE_RUNTIME_IDENTITY`, then run:
 

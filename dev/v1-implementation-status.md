@@ -30,6 +30,10 @@ and independent review gates.
   `Remap` or `WaitRevealedDrift` Mapping states.
 - Host metadata disables implicit invocation for Copilot and Loop. The independent Subagent skill
   remains eligible for main-Agent discovery and selection without a second user invocation.
+- The first trusted startup delivers one bounded Host-onboarding task for the user-level
+  `mobius-judge` custom agent. An atomic plugin-data claim selects one startup and makes concurrent
+  losers and every later startup silent; the Hook does not own provider discovery, model selection,
+  Codex configuration, or Judge execution.
 - The independent Subagent skill owns only generic delegated-task semantics. Main Agent Composition
   validates candidates and constructs every typed Core submission; discovery grants no additional
   permission or effect authority.

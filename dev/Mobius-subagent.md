@@ -770,7 +770,7 @@ Codex 可以在当前任务内路由 follow-up 或停止失控线程。这些线
 
 ## 11. Runtime、模型与 provider 边界
 
-- Runtime 对 agent/thread、turn、item、工具调用、权限、状态、模型和 usage 的公开对象是唯一运行时事实。
+- Runtime 对 agent/thread、turn、item、工具调用、权限、状态、模型、provider 和 usage 的公开对象是唯一运行时事实。
 - 本 skill 不复制官方类型，不推测未公开字段，也不把某个 CLI 版本的内部实现提升为 skill 契约。
 - Driver 只使用当前 host 正式支持的原生 Subagent workflow；线程创建、上下文装配和生命周期由 Runtime 负责。
 - Driver 是语义角色，不要求固定或证明 Runtime agent identity；实际 spawn、配置、Runtime 或权限错误如实失败。
