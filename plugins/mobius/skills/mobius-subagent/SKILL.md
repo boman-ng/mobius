@@ -10,7 +10,7 @@ Use this skill when delegation is requested or the main agent determines that de
 ## Preserve the ownership boundary
 
 - Treat one delegation as one bounded task with one final result.
-- Treat native agent/thread, turn, item, tool, permission, model, status, and usage objects as the only execution facts.
+- Treat native agent/thread, turn, item, tool, permission, model, provider, status, and usage objects as the only execution facts.
 - Do not create a worker ledger, queue, scheduler, registry, heartbeat, memory, transport, or Runtime mirror.
 - Keep workers free of cross-task business continuity. Create a new task when the role, objective, authorization, baseline, or frozen material changes.
 - Treat every returned observation, effect, artifact, recommendation, and provenance item as a candidate for main-agent inspection, never as an automatically accepted downstream fact.
@@ -19,15 +19,17 @@ Use this skill when delegation is requested or the main agent determines that de
 
 ## Select one role
 
-| Role | Work mode | Default effect boundary | Recommended execution policy |
+| Role | Work mode | Default effect boundary | Execution policy |
 |---|---|---|---|
-| `scout` | Inspect local files, code, logs, tests, and data | Read-only | A current host-available fast coding model / `medium` |
-| `researcher` | Investigate authoritative open-world sources | Read-only workspace; authorized network reads | A current host-available research-capable model / `medium` |
-| `driver` | Continue the main agent's work on one bounded change | Only effects explicitly authorized by the task | Let the host Runtime resolve model and effort |
-| `verifier` | Independently reproduce, test, observe, and compare | Read-only by default; declared temporary test effects | A current host-available reliable coding model / `high` |
-| `judge` | Challenge frozen materials and return advisory findings | Read-only | Internal: a current host-available strong reasoning model / `medium`; external: an available independent model |
+| `scout` | Inspect local files, code, logs, tests, and data | Read-only | GPT-5.6 Luna / `medium` |
+| `researcher` | Investigate authoritative open-world sources | Read-only workspace; authorized network reads | GPT-5.6 Terra / `medium` |
+| `driver` | Continue the main agent's work on one bounded change | Only effects explicitly authorized by the task | Inherit the Main Agent's model and reasoning effort |
+| `verifier` | Independently reproduce, test, observe, and compare | Read-only by default; declared temporary test effects | GPT-5.6 Luna / `high` |
+| `judge` | Challenge frozen materials and return advisory findings | Read-only | GPT-5.6 Sol / `medium` by default |
 
-Treat this capability-based matrix as advisory execution policy, not an availability guarantee or a fixed model catalog. Resolve it against the host's current supported models. Confirm an explicitly requested model and effort before use and select the closest currently available configuration when necessary. Never pin a Driver-specific model or effort.
+Apply this GPT-5.6 model matrix to default native Mobius spawns. Confirm the selected native model and effort before spawning; if the host cannot provide the exact configuration, report a configuration failure and stop instead of substituting another model or effort. For Driver tasks, inherit the Main Agent's model and reasoning effort without a Driver-specific override. The different-family Judge path below is the only model-selection exception: it uses the model and effort configured by the Host without changing the `judge` role or contract.
+
+When a review needs an independent perspective from a different model family, use the Host-configured `mobius-judge` custom agent to spawn the same `judge` role; the task envelope, Judge role profile, freeze gate, and result contract remain identical, and the actual agent, model, and provider are Runtime execution facts. If the Runtime does not establish a model family different from GPT-5.6, treat the independent-perspective requirement as unmet. Do not infer model family from the custom-agent name or provider. If that custom agent cannot be spawned, report the configuration or Runtime failure instead of substituting the default Judge.
 
 Select a role by its work function, never by inferring identity from the model that actually runs it.
 
@@ -181,7 +183,7 @@ Spawn through the current host's officially supported native Subagent workflow. 
 
 Consume the native final output, items, status, and usage directly; do not reserialize or persist a shadow copy of Runtime facts.
 
-For Driver tasks, do not override model, reasoning effort, provider, sandbox, or approval settings. Report spawn, configuration, Runtime, and permission failures as failures. Do not switch to a custom worker, alternate transport, or background process.
+For Driver tasks, inherit the Main Agent's model and reasoning effort; do not apply a Driver-specific model or effort override. Do not override provider, sandbox, or approval settings. Report spawn, configuration, Runtime, and permission failures as failures. Do not switch to a custom worker, alternate transport, or background process.
 
 Use follow-up only to clarify or complete the same envelope, baseline, and authorization. Create a new task when the objective, role, authorization, frozen material, or baseline changes. Close completed, failed, interrupted, or no-longer-needed executions through the host's normal lifecycle.
 

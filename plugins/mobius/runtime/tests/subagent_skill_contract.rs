@@ -366,7 +366,7 @@ fn judge_gate_closes_freeze_and_coverage_bypasses() {
 }
 
 #[test]
-fn role_and_model_policy_remain_semantic_and_driver_is_unpinned() {
+fn role_and_model_policy_pin_the_gpt_5_6_matrix_and_driver_inherits() {
     let skill = read(&skill_root().join("SKILL.md"));
     assert_contains_all(
         &skill,
@@ -377,18 +377,43 @@ fn role_and_model_policy_remain_semantic_and_driver_is_unpinned() {
             "`driver`",
             "`verifier`",
             "`judge`",
-            "current host-available fast coding model / `medium`",
-            "current host-available research-capable model / `medium`",
-            "current host-available reliable coding model / `high`",
-            "current host-available strong reasoning model / `medium`",
-            "Let the host Runtime resolve model and effort",
-            "advisory execution policy, not an availability guarantee or a fixed model catalog",
-            "Never pin a Driver-specific model or effort.",
+            "GPT-5.6 Luna / `medium`",
+            "GPT-5.6 Terra / `medium`",
+            "GPT-5.6 Luna / `high`",
+            "GPT-5.6 Sol / `medium`",
+            "Inherit the Main Agent's model and reasoning effort",
+            "Apply this GPT-5.6 model matrix to default native Mobius spawns",
+            "The different-family Judge path below is the only model-selection exception",
+            "uses the model and effort configured by the Host",
+            "report a configuration failure and stop instead of substituting another model or effort",
+            "use the Host-configured `mobius-judge` custom agent to spawn the same `judge` role",
+            "task envelope, Judge role profile, freeze gate, and result contract remain identical",
+            "actual agent, model, and provider are Runtime execution facts",
+            "treat the independent-perspective requirement as unmet",
+            "Do not infer model family from the custom-agent name or provider",
+            "instead of substituting the default Judge",
+            "permission, model, provider, status, and usage objects as the only execution facts",
             "Select a role by its work function",
         ],
     );
-    assert!(
-        !skill.contains("gpt-") && !skill.contains("o3") && !skill.contains("o4"),
-        "the skill must not hardcode a time-sensitive model catalog"
+    assert_eq!(
+        skill.matches("| `judge` |").count(),
+        1,
+        "the package must expose one Judge role contract"
     );
+    for forbidden in [
+        "`judge` internal",
+        "`judge` external",
+        "External Judge",
+        "Kimi",
+        "judge_kind",
+        "reviewer_kind",
+        "review_route",
+        "external independent review is outside this native role matrix",
+    ] {
+        assert!(
+            !skill.contains(forbidden),
+            "the Skill must not introduce a Judge variant or branded route: {forbidden}"
+        );
+    }
 }
