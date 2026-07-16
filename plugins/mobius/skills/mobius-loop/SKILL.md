@@ -1,94 +1,132 @@
 ---
 name: mobius-loop
-description: "Run one locked Mobius Objective through Route Runs, Evidence, Review Targets, and recorded Review Judgments."
+description: Continue one explicitly selected Mobius Objective through typed Core state, optional native delegated work, evidence admission, review, and verified completion. Use only when the user explicitly asks to run or continue a named Mobius Objective; ordinary implementation or review work must not trigger this skill.
 ---
 
 # Mobius Loop
 
-Use this skill only for a locked, explicitly targeted Mobius Objective. Do not use it for ordinary
-Codex tasks, ad hoc implementation loops, or non-Mobius review gates. By default, run the full
-locked Objective until Mobius reaches a terminal gate or a real stop condition.
+Run one Objective from its current Core state. Let Core own facts and guards; let the main agent
+own work selection, candidate interpretation, Evidence translation, formal Judgment, and every
+mutation submission.
 
-Hooks may block direct CSV edits or explicit false terminal claims. Hooks never advance loop state,
-run reviewers, or accept an Objective.
+## Enforce the invocation gate
 
-## Full Loop
+Proceed only when the user explicitly requests Mobius and identifies the Objective to run. Read
+the project binding, typed status, current heads, context, review material, and next actions before
+doing work. Stop on a missing, different, terminal, or ambiguously selected Objective rather than
+guessing the target.
 
-1. Resolve the Mobius plugin root from this skill path, then run all Mobius CLI commands through
-   that absolute script path.
-2. Read status and ask for the next required action:
+Use only these Core MCP tools:
 
-```bash
-python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> explain \
-  --session-id <codex-session-id> \
-  --objective-slug <objective-slug>
+- `mobius_read`
+- `mobius_capture_artifact`
+- `mobius_read_artifact`
+- `mobius_apply_transition`
+- `mobius_audit`
 
-python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> continue \
-  --session-id <codex-session-id> \
-  --objective-slug <objective-slug>
+Only `mobius_apply_transition` submits business transitions. Do not use CLI, direct files, SQL, or
+another state path. Never request, open, parse, or use a report, view, or CSV as work, Evidence,
+Judgment, proof, or completion input.
+
+## Run the state-driven loop
+
+Repeat this sequence until Core reports a terminal state or the work is honestly blocked:
+
+1. Read live heads, current context, relevant objects or review material, and typed next actions.
+2. Choose work from the current model need; do not choose a transition because of a worker role.
+3. Perform the work directly or use the delegated lane below.
+4. Inspect actual observations, effects, artifacts, counterevidence, unknowns, and cleanup.
+5. Translate only verified candidates into complete typed model input.
+6. Re-read the live baseline, then submit at most one transition.
+7. Read the accepted state before selecting the next action.
+
+Keep Core submissions strictly serial. A stale head, changed subject, changed Acceptance Context,
+or changed frozen material invalidates the old candidate for admission. Preserve it only as a lead;
+still inspect and clean up any real-world effects that already occurred.
+
+## Install execution remaps
+
+When Core reports `Mapping`, read its typed `MappingReason` before selecting the next action.
+
+- For `Remap` or `WaitRevealedDrift`, own the replacement Map installation in this loop. Shape the
+  complete Map, initial Routes, cover judgment, and carry judgment from the current typed context;
+  submit `InstallMap` only when the reported next action permits it, then re-read Core.
+- For `Initial` or `SpecRevised`, do not submit `InstallMap`. Hand control to `$mobius-copilot`,
+  because that installation belongs to its confirmed activation or revision branch.
+
+Never infer the reason from prose or a prior state. On a missing or unknown reason, stop without
+submitting a transition.
+
+## Use the delegated lane
+
+Use `$mobius-subagent` and the current host's native Subagent workflow when delegation is useful.
+Do not create another runtime, queue, registry, role protocol, or persistent task state.
+Do not require a separate user invocation merely to select this optional delegation path. Preserve
+the user's authorization, approval, and effect boundaries for every delegated task.
+
+Choose only the bounded tasks justified by the current missing observation, effect, verification,
+or counterargument. Use a Driver only when an authorized external effect is needed; use Scout,
+Researcher, or Verifier tasks for distinct investigation needs; use zero or more independent Judges
+when an advisory challenge would materially improve the main agent's decision. Do not impose a
+fixed role sequence or worker count.
+
+Run independent read-only tasks concurrently when the host supports it. Keep overlapping effects
+serial, start Verifier work only after the relevant effect is stable, and freeze exact materials
+before each Judge task. Use the existing role envelopes unchanged and keep every Judge advisory.
+
+Add both of these explicit forbidden rules to every Mobius delegation envelope:
+
+- Do not call any Mobius Core MCP method, including any of the six `mobius_*` tools.
+- Do not read or write `.mobius/` managed state.
+
+Check both rules before spawning. Reject and rebuild an envelope when either rule is absent; never
+send a partially bounded Mobius delegation.
+
+The rules apply even when the Runtime exposes the same tools and filesystem permissions to a child
+thread. Do not pass a Core handle, mutation instruction, database content, report, view, or CSV to
+a worker. A boundary violation, spawn/configuration/runtime/permission failure, partial effect,
+unauthorized effect, or pending cleanup cannot advance Core state.
+
+The direct lane follows the same candidate-consumption and Core-admission path without spawning
+workers. Delegation is optional work production, not a second state-machine path.
+
+## Consume candidates
+
+For every native result, check the pinned baseline, all objective and done-condition results,
+boundary compliance, material versions, actual effect scope, provenance, artifacts, uncertainties,
+and cleanup. Verify the affected world rather than accepting a summary or role disposition.
+
+For Evidence, identify the current subject and Acceptance Context, freeze the observation inline or
+with `mobius_capture_artifact`, define the claims domain and provenance, and construct the complete
+typed Evidence as the main agent. A worker result, effect record, artifact locator, or successful
+Runtime status is never Evidence by itself.
+
+For formal Judgment, read the current Core review material and required dependency view, inspect
+the complete Packet, Evidence, counterevidence, and unknowns, and independently construct the typed
+Decision or wait Judgment. Judge advice, votes, model count, and recommendations never become the
+formal Judgment automatically. Packet materialization for sealing remains Core-owned.
+
+## Hand off Objective contract changes
+
+`$mobius-copilot` is the sole Composition owner of Objective activation, revision, abandonment, and
+the `Initial` or `SpecRevised` Map installation those actions require. This loop does not submit
+those contract transitions. It requires an already active Objective, so activation is outside its
+entry contract. If the user requests revision or abandonment, or the work exposes a need for
+either, re-read the live baseline, report the exact contract decision required, and hand control to
+`$mobius-copilot`. Do not turn the handoff itself into a mutation or inferred human confirmation.
+
+## Gate the completion claim
+
+Treat Objective setup, successful delegated work, any number of favorable advisory reviews, an
+accepted review, and an empty local task list as non-terminal signals. Completion exists only when
+a fresh `mobius_read` for the selected Objective reports `Achieved`.
+
+After that read succeeds, include exactly this standalone line in the final response:
+
+```text
+MOBIUS_OBJECTIVE_ACHIEVED: <objective-id>
 ```
 
-3. Treat `loop` as the controller:
-   - Continue automatically while `loop.agent_must_continue=true`.
-   - Stop only when `loop.agent_must_stop=true`, `ok=false`, a required tool/reviewer is
-     unavailable, the user interrupts, or the Verdict is `accepted` or `blocked`.
-   - Prefer `loop.next_argv` and `loop.next_actions` over reconstructing commands from prose.
-
-4. When `next_required_action=start_route_run`, start the returned Work Item route:
-
-```bash
-python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> route-run-start \
-  --session-id <codex-session-id> \
-  --objective-slug <objective-slug> \
-  --work-item-id <W1>
-```
-
-5. Implement only the selected Work Item scope.
-6. Record objective Evidence for the linked Criteria:
-
-```bash
-python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> evidence-add \
-  --session-id <codex-session-id> \
-  --objective-slug <objective-slug> \
-  --type command_result \
-  --summary "<what the evidence proves>" \
-  --supports <C1> \
-  --artifact-json '{"type":"command_result","name":"<command name>","command":"<command>","exit_code":0}'
-```
-
-7. When Evidence is present, create the Review Target:
-
-```bash
-python3 <mobius-plugin-root>/scripts/mobius.py --project-root <project-root> review-target-create \
-  --session-id <codex-session-id> \
-  --objective-slug <objective-slug> \
-  --review-mode checkpoint_review \
-  --work-item-id <W1>
-```
-
-8. Use Mobius Review MCP:
-   - `mobius_review_build_subagent_prompt` builds the host reviewer prompt from the Review Target.
-   - Run the host Codex subagent with that prompt.
-   - Pass its raw stateless result to `mobius_review_record_checkpoint_judgment` or
-     `mobius_review_record_exit_judgment`.
-   - Close the completed host subagent after the review is recorded or after a visible failure.
-
-9. After any recorded Review Judgment with `ok=true` and `persisted=true`, immediately call
-   `continue` and execute the returned loop action.
-
-10. When `continue` reports `create_exit_review_target`, create an exit Review Target and record an
-    exit Review Judgment. Completion is allowed only when the recorded exit result leads to
-    `gate=accepted` or the loop returns terminal `accepted`.
-
-## Rules
-
-- Use Mobius only for explicitly targeted Objective work.
-- Implement exactly the returned Work Item scope and leave unrelated paths alone.
-- Review Feedback is loop work, not Route failure budget.
-- Do not mark Criteria passed from agent confidence or self-review.
-- Do not reuse a Review Target for a second Review Judgment.
-- Do not create Review Targets, record Review Judgments, add Evidence, or start Route Runs after a
-  terminal Verdict.
-- During repair, prune obsolete wrong-path artifacts instead of preserving compatibility aliases,
-  broad fallbacks, or glue layers.
-- If the contract itself must change, return to `mobius-plan` and create a new Objective contract.
+Use the exact selected Objective identity. Do not emit the marker for waiting, abandoned, blocked,
+degraded, unreadable, stale, or otherwise non-Achieved state. Report those states truthfully and
+leave the marker absent.
