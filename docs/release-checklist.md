@@ -1,79 +1,141 @@
 # Release Checklist
 
-Use this checklist before tagging `v0.5.0`.
+A Mobius v1 release is publishable only after all four phase gates, every P0 gate in
+`dev/Mobius-implement.md`, the supported-host checks below, and the final independent review pass
+against the exact candidate. No single package, unit-test, or native-agent result is a release
+claim by itself.
 
-## Verify
+## Source Gate
 
-Run the release gate from a clean checkout:
-
-```bash
-python -m pip install -r requirements-dev.txt
-PYTHONDONTWRITEBYTECODE=1 python -m pytest
-PYTHONPYCACHEPREFIX="$(mktemp -d)" python -m py_compile \
-  plugins/mobius/scripts/mobius.py \
-  plugins/mobius/scripts/mobius_review_mcp.py \
-  tests/mobius_regression_tests.py \
-  tests/test_release_bundle.py
-python plugins/mobius/scripts/mobius.py --project-root "$PWD" hook-health
-git diff --check && git status --short --ignored=no
-```
-
-All commands must pass. Inspect the final status output before tagging: no local Mobius ledger state
-should appear, and all release files should be intentionally staged or committed.
-
-## Review Release Contents
-
-- Confirm `plugins/mobius/.codex-plugin/plugin.json` has version `0.5.0`, repository metadata,
-  `Apache-2.0` license metadata, `./skills/`, and `./.mcp.json`.
-- Confirm `.agents/plugins/marketplace.json` points to `./plugins/mobius` with installation
-  `AVAILABLE` and authentication `ON_INSTALL`.
-- Confirm `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, and
-  `docs/official-docs-basis.md` match the release.
-- Review `/hooks` after installing from the tag. Mobius hooks must remain local guardrails for
-  protected Mobius ledgers and false terminal claims.
-- Run the Review MCP launcher self-check with a clean `PLUGIN_DATA` directory.
-
-## Review Coverage
-
-- Confirm regression tests cover Objective creation, Work Item locking, Criterion evidence,
-  Review Target one-shot behavior, Review Judgment recording, Route Run time accounting, and exit
-  Verdict derivation.
-- Confirm regression tests cover Codex session timing precision, mixed tool accounting, and
-  Review Feedback routing.
-- Confirm pytest covers manifest/marketplace validation, Review MCP launcher self-check, generated
-  file checks, release-source hygiene, and ignored local Mobius state.
-- Confirm release-facing docs describe the canonical v0.5 model and `budget.csv`.
-- Confirm no `.mobius` ledger state, generated environments, bytecode, local cache paths, personal
-  home paths, or secrets are visible in `git status --short --ignored=no`.
-
-## Tag
+Run from a clean checkout:
 
 ```bash
-git tag -a v0.5.0 -m "Mobius v0.5.0"
-git push origin v0.5.0
+export CARGO_TARGET_DIR="$PWD/.tmp/cargo-target"
+test "$(rustc --version --verbose | sed -n 's/^release: //p')" = 1.85.0
+cargo fmt --manifest-path plugins/mobius/runtime/Cargo.toml --all --check
+cargo check --manifest-path plugins/mobius/runtime/Cargo.toml --locked --all-targets
+cargo clippy --manifest-path plugins/mobius/runtime/Cargo.toml --locked --all-targets -- -D warnings
+cargo test --manifest-path plugins/mobius/runtime/Cargo.toml --locked --all-targets
+bash tests/release_bundle_contract.sh source "$PWD"
+git diff --check
+git status --short --ignored=no
+git check-ignore -q .mobius/probe
+git check-ignore -q .tmp/probe
+git check-ignore -q plugins/mobius/runtime/target/probe
 ```
 
-## Install Or Refresh
+The source contract must prove:
+
+- one Cargo package exposes exactly one binary target named `mobius`;
+- manifest, MCP config, and hook config use their canonical relative paths;
+- the source marketplace contains exactly one Mobius entry and keeps it `NOT_AVAILABLE`;
+- source contains no `plugins/mobius/bin/mobius`, Python runtime, or shell launcher path.
+
+## Target Bundle Gate
+
+The only configured target is `x86_64-unknown-linux-gnu`:
 
 ```bash
-codex plugin marketplace add boman-ng/mobius --ref v0.5.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
-codex plugin add mobius@mobius
+target=x86_64-unknown-linux-gnu
+version="$(jq -r '.version' plugins/mobius/.codex-plugin/plugin.json)"
+bash .github/scripts/build-release-binary.sh "$target"
+bash .github/scripts/assemble-release-bundle.sh \
+  "$target" \
+  "$CARGO_TARGET_DIR/$target/release/mobius" \
+  "$PWD/.tmp/mobius-$version-$target"
+bash tests/release_bundle_contract.sh bundle \
+  "$PWD/.tmp/mobius-$version-$target"
+# Required on a release host with the Codex CLI installed:
+bash tests/release_bundle_contract.sh codex-install \
+  "$PWD/.tmp/mobius-$version-$target"
 ```
 
-To refresh an existing Git marketplace snapshot, run:
+The assembled root must contain:
 
-```bash
-codex plugin marketplace upgrade
-codex plugin remove mobius@mobius
-codex plugin add mobius@mobius
+```text
+.agents/plugins/marketplace.json       # assembled copy only: AVAILABLE
+LICENSE
+SHA256SUMS
+plugins/mobius/.codex-plugin/plugin.json
+plugins/mobius/.mcp.json
+plugins/mobius/bin/mobius              # the only executable
+plugins/mobius/hooks/hooks.json
+plugins/mobius/skills/...
 ```
 
-Start a new Codex thread after install or refresh so skills, MCP config, and hooks are loaded from
-the installed plugin cache.
+The release helper requires the root-pinned Rust `1.85.0` toolchain and produces one checksummed
+x86-64 executable without Rust source, personal build-host paths, Python, or a system-SQLite runtime
+dependency. Bundle validation exercises representative installed Hook and MCP wires; exhaustive
+semantic matrices remain in Rust tests.
 
-## Residual Limits
+CI archives that directory, writes a separate archive checksum, extracts it into a fresh directory,
+and runs `bundle-shape` so extraction, executable mode, layout, and internal checksums are rechecked
+without repeating installed semantic smoke. The `codex-install` mode separately creates an isolated `HOME` and
+`CODEX_HOME`, admits the assembled marketplace through the installed Codex CLI, installs the
+plugin into the real Codex cache layout, and verifies the resolved cache cwd and relative command.
+It then runs complete direct and delegated public-MCP loops under `env -i` and
+`PATH=/nonexistent`. Both must reach `Achieved`, use Core-owned review material, and finish with a
+healthy audit. The installed delegated lane consumes one prevalidated successful observation; the
+full result validator and stale, incomplete, unauthorized, cleanup-pending, and missing-boundary
+matrix remain solely in the Rust native-host gate below. The uploaded target artifact is not publishable unless every
+preceding job, the real-loader gate, and the independent requirement-by-requirement cross-review
+pass.
 
-- This release is distributed through a repository marketplace, not an official public Plugin
-  Directory listing.
-- Exit review requires a valid non-degraded Review Judgment.
-- Mobius does not replace repository tests, CI, code review, or secret scanning.
+## Native Host Gate
+
+An eligible v1 release host is Linux x86-64 with a stable Codex CLI version `>=0.143.0`. The
+`codex-install` gate fails closed for an older version, a prerelease, or malformed version output.
+This comparison is only the admission floor: every actual host version must pass the complete
+installed-plugin, Hook, MCP, direct-loop, and delegated-loop gate before release.
+Bundle and extracted-archive smoke tests also require the MCP initialize version to equal the
+installed plugin manifest version, preventing a stale runtime binary from passing under current
+release metadata.
+
+Before release, use the native Subagent workflow with the installed `mobius-subagent` skill and
+record outcomes, not a copied Runtime ledger:
+
+1. Freeze the skill, selected role profile, task baseline, and every supplied material.
+2. Spawn a bounded Driver or Verifier without overriding model, provider, effort, sandbox, approval,
+   or permission settings. Exercise native wait, same-envelope follow-up, completion, and interrupt.
+3. Preserve spawn, configuration, Runtime, and permission failures exactly. Do not retry through a
+   custom worker, alternate transport, elevation, or success-shaped fallback.
+4. For the delegated Composition E2E, require both forbidden boundaries and the complete public
+   result envelope. A malformed success-shaped result must be rejected before submit.
+5. Supply the validated task/result/opaque native identity transiently through
+   `MOBIUS_NATIVE_TASK_JSON`, `MOBIUS_NATIVE_RESULT_JSON`, and
+   `MOBIUS_NATIVE_RUNTIME_IDENTITY`, then run:
+
+   ```bash
+   cargo test --manifest-path plugins/mobius/runtime/Cargo.toml --locked \
+     --test mcp_protocol \
+     clean_stdio_mcp_delegated_composition_gates_full_result_then_main_reaches_achieved \
+     -- --exact
+   ```
+
+The test must pass through the real stdio MCP process to `Achieved` and healthy audit. Do not commit
+the native task/result, agent identity, thread items, usage, or a worker registry. Any new host or
+changed experimental MCP metadata shape requires this gate again.
+
+## Phase Preconditions
+
+- Phase 1 proves all eleven object mappings, Map constraints, transitions, `I1..I19`, deterministic
+  replay, strict persistent codec, and one binary target.
+- Phase 2 proves project binding, exactly one SQLite database per project, transactions,
+  idempotency, artifacts, Packet materialization, recovery, MCP, reports, and crash behavior.
+- Phase 3 proves all thirteen independent Subagent acceptance conditions and native host lifecycle
+  failures without Core knowledge or a Runtime mirror.
+- Phase 4 proves Composition, typed human confirmation, narrow hooks, forbidden delegation
+  boundaries, both end-to-end paths, clean-host execution, and every P0 release gate.
+
+## Final Review
+
+- Inspect the full diff and archive for secrets, personal paths, generated state, v0.5 runtime
+  remnants, Python, launchers, downloaders, a second executable, or a second state path.
+- Confirm the source marketplace is still `NOT_AVAILABLE` and only the assembled copy is
+  `AVAILABLE`.
+- Confirm the archive version matches Cargo, manifest, changelog, tag, and release notes.
+- Confirm `plugins/mobius/.codex-plugin/plugin.json`, `.mcp.json`, and `hooks/hooks.json` still
+  resolve to the same installed `bin/mobius`.
+- Run an independent cross-review against every blueprint requirement and recorded command result.
+- Confirm `dev/v1-implementation-status.md` records no open Phase 2–4 engineering decision and
+  states any accepted residual performance or cooperative-threat-model risk explicitly.

@@ -1,104 +1,97 @@
 # Mobius
 
-Mobius is a local-only Codex plugin for explicit objective-and-loop work. It creates a locked
-Objective contract with `mobius-plan`, then `mobius-loop` drives Work Items through Route Runs,
-objective Evidence, Review Targets, recorded Review Judgments, and a derived Verdict.
+Mobius v1 is a local-only, strictly serial, auditable route-finding system driven by a main Agent.
+An Objective advances through Stage, Route, Attempt, Evidence, and Review until every current Stage
+has an accepted proof, or a human abandons the Objective.
 
-Mobius is for work where "done" should be backed by local ledgers instead of agent confidence. It
-does not send project state to a hosted Mobius service.
+Mobius v1.0.0 is the first stable single-binary release. The checked-in marketplace deliberately
+marks the source plugin `NOT_AVAILABLE` because source does not contain a release binary and has no
+install-time build or download path. The GitHub release publishes the gated Linux x86-64 assembled
+marketplace and its checksum.
 
-## What It Includes
+## Architecture
 
-- `mobius-plan`: creates, validates, and locks an explicit Objective contract.
-- `mobius-loop`: executes the locked Objective through Route Runs, Evidence, Review Targets, and
-  recorded Review Judgments.
-- `mobius-review`: a bundled stdio MCP server that records checkpoint and exit Review Judgments.
-- Lifecycle hooks: narrow local guardrails for protected Mobius ledgers and false terminal claims.
+The design has three owners with one-way composition:
 
-## Requirements
+```text
+            Main Agent Composition
+                 /             \
+                v               v
+          Model Core       Subagent Skill
+```
 
-- Codex with plugin, skill, MCP, and hook support.
-- Python 3.11 or newer.
-- `uv` available on `PATH`, or `MOBIUS_REVIEW_UV` set to an absolute `uv` executable.
+- Model Core owns typed objects, guards, the pure reducer, Trail, Evidence admission, artifacts,
+  persistence, and the only mutation service.
+- The optional Subagent Skill owns generic delegation roles and result/effect envelopes. It knows
+  nothing about Core objects, APIs, paths, or persistence.
+- Main Agent Composition interprets open-world work, translates observations into typed Evidence,
+  forms formal Judgments, and submits guarded commands to Core.
 
-## Install From This Repository
+The authoritative blueprints are:
+
+- `dev/mobius-model.md`
+- `dev/Mobius-subagent.md`
+- `dev/Mobius-implement.md`
+
+## Current Release
+
+The active tree contains one Cargo package with one `mobius` binary target, the
+`mobius-copilot` and `mobius-loop` Model skills, the independent Subagent skill, project-bound
+SQLite and artifact stores, the Core service, public stdio MCP, read-only operational CLI modes,
+context-dark reports, and narrow hooks. Direct and delegated Composition loops are tested through
+the real MCP process; the delegated lane keeps worker output candidate-only and lets only main
+construct typed Core input. Detailed evidence and the supported-host boundary are recorded in
+`dev/v1-implementation-status.md`.
+
+`mobius-copilot` exclusively manages human-authorized Objective activation, revision,
+abandonment, and the initial or specification-revision Map those actions require. It resumes an
+interrupted durable Mapping state through that same installation path. `mobius-loop` executes an
+already active Objective, including operational remap and wait-drift Map installation; it hands
+contract changes back to Copilot instead of creating a second owner. Host policy requires users to
+invoke both Composition skills explicitly. The independent `mobius-subagent` remains discoverable
+so the main Agent may select bounded delegation while running an explicit Loop; discovery never
+expands the task's permission or effect boundaries.
+
+The v0.5 Python/CSV implementation is no longer present in the active plugin tree. Its durable
+source remains tag `v0.5.0`; a checksummed local inspection copy is stored under `.tmp/`, which is
+intentionally ignored and is not a release or compatibility path.
+
+## Install v1.0.0
+
+Download both release assets, verify the checksum, extract the marketplace, then install it through
+Codex:
 
 ```bash
-codex plugin marketplace add boman-ng/mobius --ref v0.5.0 --sparse .agents/plugins --sparse plugins --sparse LICENSE
+sha256sum --check mobius-1.0.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf mobius-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+codex plugin marketplace add ./mobius-1.0.0-x86_64-unknown-linux-gnu
 codex plugin add mobius@mobius
 ```
 
-After installing or updating, start a new Codex thread so bundled skills, MCP config, and hooks are
-loaded from the installed plugin cache.
+Start a new Codex thread after installation so the v1 Skills, MCP server, and Hooks load from the
+installed plugin cache. Review and trust the packaged Hooks before using Mobius on a project.
 
-## Basic Usage
+## Release Artifact Contract
 
-Create and lock an Objective contract:
+The first and only configured target is `x86_64-unknown-linux-gnu`. Its assembled marketplace root
+contains the plugin at `plugins/mobius/` and exactly one executable at
+`plugins/mobius/bin/mobius`. The manifest selects the MCP and hook configs, and both configs invoke
+that same executable through paths relative to the installed plugin root.
+The installed bundle excludes Rust source, development tests, Python, a SQLite CLI, launchers,
+downloaders, and helper executables.
 
-```text
-$mobius:mobius-plan <objective description>
-```
-
-Run the full loop:
-
-```text
-$mobius:mobius-loop <objective-slug>
-```
-
-Mobius records local execution state outside source control. This repository ignores `.mobius/`
-because it is local evidence and ledger data, not release source.
-
-## Model
-
-Mobius keeps one normal path:
-
-1. Lock an Objective with ordered Work Items and Criteria.
-2. Select a Route and start a Route Run for the next Work Item.
-3. Record objective Evidence for each Criterion.
-4. Create a one-shot Review Target from current ledgers.
-5. Record a checkpoint Review Judgment as feedback for the Route Run.
-6. Record an exit Review Judgment before the final Verdict can become `accepted`.
-
-Review feedback is not the unit of failure. A Route Run can keep receiving feedback until its
-Timebox expires, no viable Route remains, a required tool or reviewer is unavailable, or the user
-stops the loop. `budget.csv` records metered harness-internal time separately from external or
-detached work. Codex session imports preserve the finest defensible timing precision in the
-`source` cell instead of inventing missing durations.
+CI copies the assembled plugin into an isolated Codex-style cache and starts both `--help` and the
+stdio MCP initialize handshake with an empty environment and an unusable `PATH`. The release-host
+gate admits stable Codex CLI versions `>=0.143.0`, then installs the marketplace through the actual
+host, verifies the resolved cache command and cwd, and runs complete direct and delegated MCP loops
+to `Achieved` under `PATH=/nonexistent`. The minimum version is an admission floor; every actual
+release host must pass the full gate. The checked-in marketplace stays unavailable; only the
+assembled copy is marked `AVAILABLE`.
 
 ## Verification
 
-From a checkout:
-
-```bash
-python -m pip install -r requirements-dev.txt
-PYTHONDONTWRITEBYTECODE=1 python -m pytest
-```
-
-The pytest suite checks ledger contracts, Review Target/Judgment recording, time accounting,
-manifest shape, MCP launcher self-check, hook health, generated-file hygiene, and ignored local
-Mobius state.
-
-## Troubleshooting
-
-If the Review MCP self-check cannot find `uv`, install `uv` or set `MOBIUS_REVIEW_UV` to the
-absolute executable path:
-
-```bash
-MOBIUS_REVIEW_UV=/absolute/path/to/uv \
-  PLUGIN_DATA="$(mktemp -d)" \
-  plugins/mobius/scripts/mobius_review_mcp_server.sh --self-check
-```
-
-If Codex reports changed hooks after install or upgrade, run `/hooks`, inspect the Mobius hook
-definitions, and trust only the version you intend to run.
-
-## Current Limits
-
-- Official public Plugin Directory publishing is not self-serve yet; this repository uses a repo
-  marketplace for distribution.
-- Exit review requires a valid non-degraded Review Judgment.
-- Mobius hooks guard Mobius state only. They do not replace tests, CI, code review, or repository
-  security controls.
+Use `AGENTS.md` for contributor rules and the canonical development gate, and
+`docs/release-checklist.md` for release-only build, installation, and host checks.
 
 ## License
 
