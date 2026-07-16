@@ -29,7 +29,8 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Verify pinned Rust
-        run: test "$(rustc --version --verbose | sed -n 's/^release: //p')" = 1.85.0
+        run: |
+          test "$(rustc --version --verbose | sed -n 's/^release: //p')" = 1.85.0
 
       - name: Format
         run: cargo fmt --manifest-path plugins/mobius/runtime/Cargo.toml --all --check
