@@ -75,9 +75,32 @@ The Codex `0.144.4` native-host gate was exercised on 2026-07-15 for the then-cu
 That run exercised native wait, same-envelope follow-up, normal completion, interruption, and
 truthful spawn, configuration, Runtime, and permission failures. The current source intentionally
 changes the Skill invocation contract and adds host metadata, so those exact-byte results remain
-historical evidence rather than evidence for the current candidate. Publication requires rerunning
-the native-host gate against the exact release candidate as specified in
-`docs/release-checklist.md`.
+historical evidence rather than evidence for the current candidate.
+
+### v1.0.0 Exact-Candidate Native-Host Evidence
+
+The Codex `0.144.5` native-host gate was rerun on 2026-07-16 for the v1.0.0 candidate and these
+exact bytes:
+
+- `mobius-subagent/SKILL.md`:
+  `630cfa479870ff3d2e93d7a3e337dde771ad49d3288f296b2f0b3f89483a65b3`;
+- `agents/openai.yaml`:
+  `26fbe980ab78ee4b6dc5fcf7194501fba95ca3578a1a7550cc650864e5a965b9`;
+- `references/role-profiles.md`:
+  `c4ce21b73ab01b87d10f1da874fe01d0187932047f206264def932e9ad8b45d0`;
+- `subagent_skill_contract.rs`:
+  `afc7773a527b569e7b4950931a342360abe3a5fb9c497b6e3d9bd7c1f010c963`.
+
+The run used an opaque native identity without model, provider, effort, sandbox, approval, or
+permission overrides. It exercised spawn, wait, same-envelope follow-up, normal completion, schema
+correction before consumption, and interrupt. Both Mobius forbidden
+boundaries remained explicit and observed. No configuration, Runtime, or permission failure
+occurred in the successful run, and no alternate runtime, elevation, retry transport, or
+success-shaped fallback was used. The validated native task, corrected complete result, and opaque
+identity were supplied transiently to the delegated stdio MCP E2E; its stale, partial, failed,
+unauthorized, cleanup-pending, missing-boundary, and missing-provenance matrix rejected every
+invalid candidate before Core submission, then the valid candidate reached `Achieved` and a healthy
+audit. Native task/result/identity material was not persisted in the repository.
 
 ### Packaging and Release
 
@@ -85,7 +108,8 @@ the native-host gate against the exact release candidate as specified in
 - `.github/scripts/`: reproducible binary build and bundle assembly.
 - `tests/release_bundle_contract.sh`: source, bundle, archive, installed-cache, Hook, MCP, and
   single-executable contracts.
-- `docs/release-checklist.md`: real Codex loader and native-host gates that remain release-host work.
+- `docs/release-checklist.md`: real Codex loader and native-host gates required for each exact
+  release candidate.
 
 ## Verification Snapshot
 
@@ -95,7 +119,9 @@ The 2026-07-16 invocation-policy and host-boundary candidate passed:
 - all three Skill validators and the executable Composition/Subagent metadata contracts;
 - source package contract, shell syntax, `git diff --check`, and managed-state ignore probes;
 - fresh release build, assembled-bundle validation, and isolated real Codex `0.144.5` install with
-  direct and delegated public-MCP loops.
+  direct and delegated public-MCP loops;
+- exact-byte native Subagent spawn/wait/follow-up/completion/interrupt and native-result delegated
+  stdio MCP validation through `Achieved` and healthy audit.
 
 This snapshot is implementation evidence, not publication approval. Release still requires the
 exact-candidate independent review and explicit release decision below.
