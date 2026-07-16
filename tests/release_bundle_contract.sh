@@ -80,6 +80,11 @@ validate_config() {
   ' "$mcp" >/dev/null || fail "MCP config must expose one server through ./bin/mobius"
 
   jq -e '
+    (.hooks | keys) == ["PreToolUse", "SessionStart", "Stop"] and
+    ([.hooks.SessionStart[].matcher] | unique) == ["startup"] and
+    ([.hooks.SessionStart[].hooks[].command] | unique) ==
+      ["\"${PLUGIN_ROOT}/bin/mobius\" hook session-start"] and
+    (all(.hooks.SessionStart[].hooks[]; has("statusMessage") | not)) and
     ([.hooks.PreToolUse[].hooks[].command] | unique) ==
       ["\"${PLUGIN_ROOT}/bin/mobius\" hook pre-tool-use"] and
     ([.hooks.PreToolUse[].matcher] | unique) ==
@@ -254,6 +259,62 @@ smoke_installed_plugin() {
   for mode in mcp read audit doctor report hook; do
     grep -q "mobius $mode" <<<"$help_output" || fail "help omits mode: $mode"
   done
+  grep -q "mobius hook session-start" <<<"$help_output" \
+    || fail "help omits the SessionStart handler"
+
+  plugin_data="$isolated_root/plugin-data"
+  session_start_request='{"session_id":"session-1","transcript_path":null,"cwd":"/project","hook_event_name":"SessionStart","model":"host-model","permission_mode":"default","source":"startup"}'
+  first_session_stdout="$isolated_root/session-start-1.stdout"
+  first_session_stderr="$isolated_root/session-start-1.stderr"
+  second_session_stdout="$isolated_root/session-start-2.stdout"
+  second_session_stderr="$isolated_root/session-start-2.stderr"
+  (
+    printf '%s\n' "$session_start_request" \
+      | env -i HOME="$isolated_root/home" PATH=/nonexistent PLUGIN_DATA="$plugin_data" \
+        "$installed/bin/mobius" hook session-start
+  ) >"$first_session_stdout" 2>"$first_session_stderr" &
+  first_session_pid=$!
+  (
+    printf '%s\n' "$session_start_request" \
+      | env -i HOME="$isolated_root/home" PATH=/nonexistent PLUGIN_DATA="$plugin_data" \
+        "$installed/bin/mobius" hook session-start
+  ) >"$second_session_stdout" 2>"$second_session_stderr" &
+  second_session_pid=$!
+  wait "$first_session_pid" \
+    || fail "first concurrent installed SessionStart hook failed"
+  wait "$second_session_pid" \
+    || fail "second concurrent installed SessionStart hook failed"
+  [ ! -s "$first_session_stderr" ] && [ ! -s "$second_session_stderr" ] \
+    || fail "concurrent installed SessionStart hooks wrote stderr"
+  session_context_count=0
+  [ ! -s "$first_session_stdout" ] || session_context_count=$((session_context_count + 1))
+  [ ! -s "$second_session_stdout" ] || session_context_count=$((session_context_count + 1))
+  [ "$session_context_count" = 1 ] \
+    || fail "concurrent installed SessionStart hooks did not emit exactly one context"
+  if [ -s "$first_session_stdout" ]; then
+    first_session_start=$(<"$first_session_stdout")
+  else
+    first_session_start=$(<"$second_session_stdout")
+  fi
+  jq -e '
+    .hookSpecificOutput.hookEventName == "SessionStart" and
+    (.hookSpecificOutput.additionalContext | contains("mobius-judge.toml")) and
+    (.hookSpecificOutput.additionalContext | contains("without assuming a provider id, endpoint, port, or model brand")) and
+    (.hookSpecificOutput.additionalContext | contains("Do not repeat this onboarding check in later Sessions")) and
+    (.hookSpecificOutput.additionalContext | contains("Kimi") | not) and
+    (.hookSpecificOutput.additionalContext | contains("External Judge") | not)
+  ' <<<"$first_session_start" >/dev/null \
+    || fail "installed SessionStart hook did not emit the bounded one-time onboarding context"
+  [ -f "$plugin_data/judge-onboarding-v1.claimed" ] \
+    || fail "installed SessionStart hook did not persist its atomic claim"
+
+  later_session_start=$(
+    printf '%s\n' "$session_start_request" \
+      | env -i HOME="$isolated_root/home" PATH=/nonexistent PLUGIN_DATA="$plugin_data" \
+        "$installed/bin/mobius" hook session-start
+  ) || fail "installed SessionStart hook failed on its silent path"
+  [ -z "$later_session_start" ] \
+    || fail "installed SessionStart hook repeated onboarding context"
 
   initialize_request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}'
   initialized_notification='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
