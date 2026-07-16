@@ -1,0 +1,12 @@
+interface:
+  display_name: "Mobius Copilot"
+  short_description: "Manage one explicit Objective and Map in Core"
+  default_prompt: "Use $mobius-copilot to manage the explicitly selected Objective and Map in Mobius Core."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mobius"
+      description: "Project-local Mobius Core MCP server"
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: false
