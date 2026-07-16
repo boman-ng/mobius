@@ -6,7 +6,11 @@ pub(crate) mod cli;
 pub(crate) mod hooks;
 pub(crate) mod mcp;
 
-const USAGE: &str = "Mobius v1.0.0\n\nUsage:\n  mobius mcp\n  mobius read ...\n  mobius audit ...\n  mobius doctor ...\n  mobius report ...\n  mobius hook session-start\n  mobius hook pre-tool-use\n  mobius hook stop\n";
+const USAGE: &str = concat!(
+    "Mobius v",
+    env!("CARGO_PKG_VERSION"),
+    "\n\nUsage:\n  mobius mcp\n  mobius read ...\n  mobius audit ...\n  mobius doctor ...\n  mobius report ...\n  mobius hook session-start\n  mobius hook pre-tool-use\n  mobius hook stop\n"
+);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
