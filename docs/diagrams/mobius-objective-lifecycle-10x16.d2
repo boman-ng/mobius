@@ -1,0 +1,306 @@
+# Derived from dev/mobius-model.md sections 8 and 10 and the Rust domain reducer.
+# Render the fixed-canvas PNG at 1200x1920 (10:16); keep this source naturally portrait.
+
+direction: down
+
+classes: {
+  scaffold: {
+    style.font-color: "#172033"
+  }
+  idle: {
+    style.fill: "#F8FAFC"
+    style.stroke: "#64748B"
+    style.stroke-width: 2
+    style.font-color: "#172033"
+  }
+  mapping: {
+    style.fill: "#F5F3FF"
+    style.stroke: "#7C3AED"
+    style.stroke-width: 2
+    style.font-color: "#3B2173"
+  }
+  group: {
+    style.fill: "#F8FBFF"
+    style.stroke: "#93B4E8"
+    style.stroke-width: 2
+    style.font-color: "#203A63"
+  }
+  primary: {
+    style.fill: "#EAF2FF"
+    style.stroke: "#2563EB"
+    style.stroke-width: 2
+    style.font-color: "#173A70"
+  }
+  review: {
+    style.fill: "#F3E8FF"
+    style.stroke: "#8B5CF6"
+    style.stroke-width: 2
+    style.font-color: "#4C1D75"
+  }
+  waiting: {
+    style.fill: "#FFF7ED"
+    style.stroke: "#EA580C"
+    style.stroke-width: 2
+    style.font-color: "#7C2D12"
+  }
+  matrix: {
+    style.fill: "#FFFFFF"
+    style.stroke: "#94A3B8"
+    style.stroke-width: 2
+    style.font-color: "#334155"
+  }
+  achieved: {
+    style.fill: "#ECFDF5"
+    style.stroke: "#059669"
+    style.stroke-width: 3
+    style.font-color: "#065F46"
+  }
+  abandoned: {
+    style.fill: "#FFF1F2"
+    style.stroke: "#BE123C"
+    style.stroke-width: 2
+    style.font-color: "#881337"
+  }
+}
+
+title: Mobius Objective 状态生命周期 {
+  shape: text
+  class: scaffold
+  near: top-center
+  style.font-size: 32
+  style.bold: true
+}
+
+canvas: "" {
+  grid-columns: 1
+  style.fill: transparent
+  style.stroke: transparent
+
+  entry: "" {
+    style.fill: transparent
+    style.stroke: transparent
+
+    align_outer: "" {
+      style.fill: transparent
+      style.stroke: transparent
+
+      align_inner: "" {
+        style.fill: transparent
+        style.stroke: transparent
+
+        idle: Idle\n等待显式激活 {
+          shape: oval
+          class: idle
+          width: 480
+          height: 84
+        }
+      }
+    }
+  }
+
+  active: Active Objective · q_active {
+    class: group
+    grid-columns: 1
+
+    mapping_zone: "" {
+      style.fill: transparent
+      style.stroke: transparent
+
+      mapping_row: "" {
+        grid-columns: 2
+        style.fill: transparent
+        style.stroke: transparent
+
+        mapping: Mapping\nInitial · SpecRevised\nRemap · WaitRevealedDrift {
+          class: mapping
+          width: 340
+          height: 104
+        }
+        active_rules: Active controls\nRequestRemap (Navigating) → Mapping\nReviseObjective (q_active) → Mapping\nAbandon (q_active) → Abandoned {
+          class: matrix
+          width: 420
+          height: 150
+        }
+
+        mapping -> active_rules: control summary {
+          style.stroke: "#64748B"
+          style.stroke-dash: 4
+        }
+      }
+    }
+
+    navigating: Navigating · 单一 Stage cursor {
+      class: group
+      grid-columns: 1
+
+      seeking_row: "" {
+        direction: right
+        style.fill: transparent
+        style.stroke: transparent
+
+        seeking: SeekingRoute\n寻找可证伪 Route {
+          class: primary
+          width: 340
+          height: 84
+        }
+        add_route: AddRoute\n→ SeekingRoute（状态保持） {
+          class: matrix
+          width: 330
+          height: 84
+        }
+        seeking -> add_route: enrich {
+          style.stroke: "#64748B"
+          style.stroke-dash: 4
+        }
+      }
+
+      ready_row: "" {
+        style.fill: transparent
+        style.stroke: transparent
+
+        ready: Ready\nRoute 已选择 {
+          class: primary
+          width: 340
+          height: 84
+        }
+      }
+
+      attempting_row: "" {
+        direction: right
+        style.fill: transparent
+        style.stroke: transparent
+
+        attempting: Attempting\n执行并接纳 Evidence {
+          class: primary
+          width: 340
+          height: 84
+        }
+        record_evidence: RecordEvidence\n→ Attempting（状态保持） {
+          class: matrix
+          width: 330
+          height: 84
+        }
+        attempting -> record_evidence: admit {
+          style.stroke: "#64748B"
+          style.stroke-dash: 4
+        }
+      }
+
+      reviewing_row: "" {
+        direction: right
+        style.fill: transparent
+        style.stroke: transparent
+
+        reviewing: Reviewing\nPacket 已冻结 {
+          class: review
+          width: 340
+          height: 84
+        }
+        review_rules: RecordDecision\naccept → Achieved | SeekingRoute\nretry → Ready\nreplace → SeekingRoute · reject Route\nwait → Waiting\nremap → Mapping {
+          class: review
+          width: 420
+          height: 180
+        }
+        reviewing -> review_rules: guarded outcomes {
+          style.stroke: "#7C3AED"
+          style.stroke-dash: 4
+        }
+      }
+
+      waiting_row: "" {
+        direction: right
+        style.fill: transparent
+        style.stroke: transparent
+
+        waiting: Waiting\n等待外部条件 {
+          class: waiting
+          width: 340
+          height: 84
+        }
+        wait_rules: CheckWait\nstay → Waiting\nsame_route → Ready\nnew_route → SeekingRoute · reject Route\nremap → Mapping {
+          class: waiting
+          width: 420
+          height: 165
+        }
+        waiting -> wait_rules: resolve {
+          style.stroke: "#EA580C"
+          style.stroke-dash: 4
+        }
+      }
+
+      seeking_row.seeking -> ready_row.ready: SelectRoute {
+        style.stroke: "#2563EB"
+        style.stroke-width: 2
+      }
+      ready_row.ready -> attempting_row.attempting: StartAttempt {
+        style.stroke: "#2563EB"
+        style.stroke-width: 2
+      }
+      attempting_row.attempting -> reviewing_row.reviewing: SealAttempt {
+        style.stroke: "#7C3AED"
+        style.stroke-width: 2
+      }
+      reviewing_row.reviewing -> waiting_row.waiting: wait {
+        style.stroke: "#EA580C"
+        style.stroke-width: 2
+      }
+    }
+
+    mapping_zone.mapping_row.mapping -> navigating.seeking_row.seeking: InstallMap · incomplete {
+      style.stroke: "#2563EB"
+      style.stroke-width: 2
+    }
+  }
+
+  terminal_gate: Guarded terminal exits · 非状态 {
+    class: group
+    grid-columns: 2
+
+    completion: Completion gate\nInstallMap + Complete → Achieved\naccept + Complete → Achieved {
+      class: matrix
+      width: 360
+      height: 120
+    }
+    abandonment: Human termination\nAbandon + confirmation → Abandoned {
+      class: matrix
+      width: 360
+      height: 120
+    }
+  }
+
+  terminals: "" {
+    grid-columns: 2
+    style.fill: transparent
+    style.stroke: transparent
+
+    achieved: Achieved\nManifest 一次形成 {
+      shape: oval
+      class: achieved
+      width: 360
+      height: 88
+    }
+    abandoned: Abandoned\n人类明确确认 {
+      shape: oval
+      class: abandoned
+      width: 360
+      height: 88
+    }
+  }
+
+  entry.align_outer.align_inner.idle -> active.mapping_zone.mapping_row.mapping: ActivateObjective {
+    style.stroke: "#2563EB"
+    style.stroke-width: 2
+  }
+  active -> terminal_gate: guarded terminal transitions {
+    style.stroke: "#64748B"
+    style.stroke-dash: 4
+  }
+  terminal_gate.completion -> terminals.achieved: complete {
+    style.stroke: "#059669"
+    style.stroke-width: 2
+  }
+  terminal_gate.abandonment -> terminals.abandoned: confirmed {
+    style.stroke: "#BE123C"
+    style.stroke-width: 2
+  }
+}
