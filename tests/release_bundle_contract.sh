@@ -240,6 +240,7 @@ validate_bundle_shape() {
 smoke_installed_plugin() {
   installed=$1
   isolated_root=$2
+  manifest_version=$(jq -r '.version' "$installed/.codex-plugin/plugin.json")
   workspace="$isolated_root/workspace with spaces"
   bound_container="$isolated_root/bound-container"
   project_b="$bound_container/project B with spaces"
@@ -352,10 +353,15 @@ smoke_installed_plugin() {
         | env -i HOME="$isolated_root/home" PATH=/nonexistent \
           "$installed/bin/mobius" mcp
     ) || fail "cache-copied MCP server did not initialize $root"
-    jq -s -e --argjson id "$call_id" '
-      ([.[] | select(.id == 1 and .result.serverInfo.name == "mobius")] | length) == 1 and
+    jq -s -e --argjson id "$call_id" --arg manifest_version "$manifest_version" '
+      ([.[] | select(
+        .id == 1 and
+        .result.serverInfo.name == "mobius" and
+        .result.serverInfo.version == $manifest_version
+      )] | length) == 1 and
       ([.[] | select(.id == $id and .result.isError == false)] | length) == 1
-    ' <<<"$response" >/dev/null || fail "cache-copied MCP project_init failed for $root"
+    ' <<<"$response" >/dev/null \
+      || fail "cache-copied MCP version or project_init failed for $root"
   }
 
   unbound_state_mutation=$(jq -nc \
