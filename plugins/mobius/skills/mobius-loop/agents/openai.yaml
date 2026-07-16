@@ -1,11 +1,12 @@
 interface:
   display_name: "Mobius Loop"
-  short_description: "Run a locked Mobius Objective through the full loop."
-  default_prompt: "Run the full locked Mobius Objective until accepted, blocked, or a real stop gate."
-
+  short_description: "Run one explicit Objective through Mobius Core"
+  default_prompt: "Use $mobius-loop to continue the explicitly selected Objective from current Core state."
 dependencies:
   tools:
     - type: "mcp"
-      value: "mobius-review"
-      description: "Mobius Review recorded judgment MCP server"
+      value: "mobius"
+      description: "Project-local Mobius Core MCP server"
       transport: "stdio"
+policy:
+  allow_implicit_invocation: false
