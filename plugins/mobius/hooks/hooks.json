@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/mobius\" hook session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash|Shell|exec_command|write_stdin|apply_patch|Edit|Write|mcp__.*",

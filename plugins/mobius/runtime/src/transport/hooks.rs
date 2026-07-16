@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -17,11 +17,15 @@ use crate::infrastructure::sqlite::SqliteStore;
 const COMPLETION_MARKER: &str = "MOBIUS_OBJECTIVE_ACHIEVED: ";
 const STATE_BOUNDARY_REASON: &str =
     "Mobius Core-owned state must be changed through the Mobius MCP service";
+const JUDGE_ONBOARDING_MARKER: &str = "judge-onboarding-v1.claimed";
+const JUDGE_ONBOARDING_CONTEXT: &str = r#"Mobius one-time Judge onboarding:
+Before continuing with the user's task, inspect the effective user-level Codex configuration and any locally deployed CC-Switch instance it already describes or that can be discovered without assuming a provider id, endpoint, port, or model brand. If a compatible model from a family different from GPT-5.6 is unambiguously available for independent review, make only the smallest structural user-level Codex configuration change needed to register that discovered provider and model, then create the Mobius-owned custom agent at `$CODEX_HOME/agents/mobius-judge.toml`. Give it the name `mobius-judge`, a neutral description, read-only advisory Judge instructions, the provider and model identifiers actually discovered, `model_reasoning_effort = "medium"` only when the catalog advertises that effort, and `sandbox_mode = "read-only"`.
+Preserve existing providers, credentials, model catalogs, and user-owned agent files. Do not select by model brand, overwrite a conflicting custom agent, add another Judge role, or claim an unavailable configuration. If discovery or selection is unavailable or ambiguous, leave the user configuration unchanged. A newly created custom agent is available only after Codex starts a later Session. Briefly report whether onboarding created `mobius-judge` or made no change, then continue the user's task. Do not repeat this onboarding check in later Sessions."#;
 
 pub(crate) fn run(arguments: &[OsString]) -> Result<(), MobiusError> {
     let Some(handler) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(MobiusError::invalid_invocation(
-            "hook mode requires `pre-tool-use` or `stop`",
+            "hook mode requires `session-start`, `pre-tool-use`, or `stop`",
         ));
     };
     if arguments.len() != 1 {
@@ -29,27 +33,52 @@ pub(crate) fn run(arguments: &[OsString]) -> Result<(), MobiusError> {
             "hook mode accepts exactly one handler",
         ));
     }
-    if !matches!(handler, "pre-tool-use" | "stop") {
+    if !matches!(handler, "session-start" | "pre-tool-use" | "stop") {
         return Err(MobiusError::invalid_invocation(format!(
             "unknown hook handler `{handler}`"
         )));
     }
 
     let input = read_stdin()?;
-    let output = if handler == "pre-tool-use" {
-        let input = serde_json::from_str::<PreToolUseInput>(&input)
-            .map_err(|error| invalid_hook_input("PreToolUse", error))?;
-        pre_tool_use_output(&input)
-    } else {
-        let input = serde_json::from_str::<StopInput>(&input)
-            .map_err(|error| invalid_hook_input("Stop", error))?;
-        stop_output(&input)
-    };
-
-    if let Some(output) = output {
-        write_output(&output)?;
+    match handler {
+        "session-start" => {
+            let input = serde_json::from_str::<SessionStartInput>(&input)
+                .map_err(|error| invalid_hook_input("SessionStart", error))?;
+            let plugin_data = std::env::var_os("PLUGIN_DATA")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    MobiusError::operation(
+                        "plugin_data_unavailable",
+                        "SessionStart onboarding requires PLUGIN_DATA",
+                    )
+                })?;
+            if input.source == "startup" && claim_judge_onboarding(&plugin_data)? {
+                write_output(&session_start_output())?;
+            }
+        }
+        "pre-tool-use" => {
+            let input = serde_json::from_str::<PreToolUseInput>(&input)
+                .map_err(|error| invalid_hook_input("PreToolUse", error))?;
+            if let Some(output) = pre_tool_use_output(&input) {
+                write_output(&output)?;
+            }
+        }
+        "stop" => {
+            let input = serde_json::from_str::<StopInput>(&input)
+                .map_err(|error| invalid_hook_input("Stop", error))?;
+            if let Some(output) = stop_output(&input) {
+                write_output(&output)?;
+            }
+        }
+        _ => unreachable!("handler was validated above"),
     }
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionStartInput {
+    source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +121,40 @@ fn invalid_hook_input(event: &str, error: serde_json::Error) -> MobiusError {
         "invalid_hook_input",
         format!("invalid {event} hook input: {error}"),
     )
+}
+
+fn session_start_output() -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": JUDGE_ONBOARDING_CONTEXT
+        }
+    })
+}
+
+fn claim_judge_onboarding(plugin_data: &Path) -> Result<bool, MobiusError> {
+    fs::create_dir_all(plugin_data).map_err(|error| {
+        MobiusError::operation(
+            "onboarding_state_failed",
+            format!(
+                "create plugin data directory {}: {error}",
+                plugin_data.display()
+            ),
+        )
+    })?;
+    let marker = plugin_data.join(JUDGE_ONBOARDING_MARKER);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(MobiusError::operation(
+            "onboarding_state_failed",
+            format!("claim Judge onboarding {}: {error}", marker.display()),
+        )),
+    }
 }
 
 fn pre_tool_use_output(input: &PreToolUseInput) -> Option<Value> {
@@ -3753,6 +3816,43 @@ mod tests {
     }
 
     #[test]
+    fn session_start_delivers_agentic_judge_onboarding_once() {
+        let plugin_data =
+            std::env::temp_dir().join(format!("mobius-judge-onboarding-{}", uuid::Uuid::new_v4()));
+        assert!(claim_judge_onboarding(&plugin_data).expect("first startup must claim onboarding"));
+        let first = session_start_output();
+        let context = first["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("SessionStart must return developer context");
+        assert_eq!(first["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        for required in [
+            "mobius-judge.toml",
+            "without assuming a provider id, endpoint, port, or model brand",
+            "Preserve existing providers, credentials, model catalogs, and user-owned agent files",
+            "A newly created custom agent is available only after Codex starts a later Session",
+            "Do not repeat this onboarding check in later Sessions",
+        ] {
+            assert!(context.contains(required), "onboarding omitted: {required}");
+        }
+        assert!(!context.contains("Kimi"));
+        assert!(!context.contains("External Judge"));
+
+        assert!(
+            !claim_judge_onboarding(&plugin_data)
+                .expect("later startup must inspect the onboarding claim"),
+            "only one startup may claim onboarding"
+        );
+        let entries = fs::read_dir(&plugin_data)
+            .expect("plugin data must be readable")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plugin data entries must be readable");
+        assert_eq!(entries.len(), 1, "onboarding needs only one marker");
+        assert_eq!(entries[0].file_name(), JUDGE_ONBOARDING_MARKER);
+
+        fs::remove_dir_all(plugin_data).expect("test plugin data must be removable");
+    }
+
+    #[test]
     fn pre_tool_use_denies_direct_mutation_of_authoritative_state() {
         let denied = pre_tool_use_output(&tool_input(
             "exec_command",
@@ -5846,6 +5946,18 @@ mod tests {
 
     #[test]
     fn official_codex_wire_accepts_apply_patch_command_and_nullable_stop_message() {
+        let session_start: SessionStartInput = serde_json::from_value(json!({
+            "session_id": "session-1",
+            "transcript_path": null,
+            "cwd": "/project",
+            "permission_mode": "default",
+            "hook_event_name": "SessionStart",
+            "model": "host-model",
+            "source": "startup",
+        }))
+        .expect("official SessionStart wire input must deserialize");
+        assert_eq!(session_start.source, "startup");
+
         let pre_tool_use: PreToolUseInput = serde_json::from_value(json!({
             "session_id": "session-1",
             "transcript_path": "/tmp/transcript.jsonl",

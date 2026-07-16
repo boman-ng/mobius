@@ -506,6 +506,7 @@ mobius read ...            # 只读状态与材料
 mobius audit ...           # 只读 replay、projection 与 integrity 检查
 mobius doctor ...          # 安装、binding 与 filesystem 诊断
 mobius report ...          # 人类显式生成/刷新 context-dark CSV view
+mobius hook session-start  # 一次性 Host onboarding context
 mobius hook pre-tool-use   # 窄 hook handler
 mobius hook stop           # 窄 hook handler
 ```
@@ -751,12 +752,22 @@ owner。Composition 必须按 Core 返回的 typed `MappingReason` 分派 `Insta
 
 Hooks 配置只调用同一个 `mobius hook ...` executable，保持窄边界：
 
+- session-start：只在插件被信任后的首次 `startup` 投递一次 Agentic onboarding context；main Agent 检查
+  user-level Codex 配置与可发现的本地 CC-Switch，在选择明确时配置全局 `mobius-judge` custom agent；
 - pre-tool-use：阻止绕过 Core service 修改 `.gitignore` policy、数据库、WAL、SHM、artifact 与 staging；
 - stop：只有最终文本明确声称指定 Objective 已完成时，读取 Core 并要求状态为 `Achieved`。
 
-Hooks 不启动 Objective、不推进 loop、不调用 subagent、不形成 Judgment、不复制 completion 逻辑。它们属于
-Composition shell，只能读取 Core 或保护 Core-owned files。不得保留 Python hook launcher 或另一个 hook
-executable；manifest、MCP config 与 hook config 必须解析到同一套相对路径安装的 `mobius` binary。
+SessionStart handler 自身不发现 provider、不访问模型 endpoint、不修改 Codex 配置，也不启动 subagent。它只在
+`PLUGIN_DATA` 以 `create_new` 原子声明 `judge-onboarding-v1.claimed`；只有声明成功的 Session 输出 context，
+其余并发或后续 Session 不再读取配置、不再检查 provider 或 agent，并以空 stdout 静默成功。投递的 main-Agent
+任务不得假定 provider id、endpoint、port 或 model 品牌；它只做
+最小的 user-level Codex 结构化配置，并在 provider/model 缺失、歧义或 agent 文件冲突时保持用户配置不变。
+Host custom-agent catalog 最早从下一次新 Session 使用；此后的实际 agent、model、provider 与失败由 Runtime
+如实返回。
+
+Hooks 不启动 Objective、不推进 loop、不调用 subagent、不形成 Judgment、不复制 completion 逻辑。除上述一次性
+claim 外，它们只能读取 Core 或保护 Core-owned files。不得保留 Python hook launcher 或另一个 hook executable；
+manifest、MCP config 与 hook config 必须解析到同一套相对路径安装的 `mobius` binary。
 
 `views/` 不是权威业务状态，hook 不因人工修改 CSV 而改变 Model 状态或阻止 ordinary task。Report renderer 会
 在下次显式刷新时覆盖或隔离无效 view；任何 CSV 都不能成为 completion claim 的依据。
