@@ -2,6 +2,14 @@
 
 All notable changes to Mobius are documented here.
 
+## 1.1.0 - 2026-07-16
+
+- Add one-time, trusted-startup onboarding for a provider-backed `mobius-judge` custom agent while
+  keeping one Judge role contract and leaving later Sessions silent.
+- Pin the native Scout, Researcher, Verifier, and default Judge model policies, while Driver
+  inherits the Main Agent configuration and a different model family changes only Runtime spawn
+  configuration.
+
 ## 1.0.0 - 2026-07-16
 
 - Archive the complete v0.5.0 release tree outside the active source path.
