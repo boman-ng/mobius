@@ -2,13 +2,13 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Shell|exec_command|apply_patch|Edit|Write|mcp__.*",
+        "matcher": "Bash|Shell|exec_command|write_stdin|apply_patch|Edit|Write|mcp__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "/bin/sh -c 'root=\"${1-}\"; shift; if [ -z \"$root\" ]; then echo \"mobius:hook-misconfigured: PLUGIN_ROOT missing\" >&2; exit 2; fi; if [ ! -d \"$root\" ]; then case \"$root\" in */.codex/plugins/cache/*/mobius/*) echo \"mobius:hook-unavailable: installed plugin cache missing\" >&2; exit 0 ;; esac; fi; exec /bin/sh \"$root/scripts/mobius_hook_launcher.sh\" \"$root\" \"$@\"' mobius-hook \"${PLUGIN_ROOT}\" hook pre-tool-use",
+            "command": "\"${PLUGIN_ROOT}/bin/mobius\" hook pre-tool-use",
             "timeout": 10,
-            "statusMessage": "Checking Mobius state boundary"
+            "statusMessage": "Checking the Mobius Core state boundary"
           }
         ]
       }
@@ -18,9 +18,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/bin/sh -c 'root=\"${1-}\"; shift; if [ -z \"$root\" ]; then echo \"mobius:hook-misconfigured: PLUGIN_ROOT missing\" >&2; exit 2; fi; if [ ! -d \"$root\" ]; then case \"$root\" in */.codex/plugins/cache/*/mobius/*) echo \"mobius:hook-unavailable: installed plugin cache missing\" >&2; exit 0 ;; esac; fi; exec /bin/sh \"$root/scripts/mobius_hook_launcher.sh\" \"$root\" \"$@\"' mobius-hook \"${PLUGIN_ROOT}\" hook stop",
+            "command": "\"${PLUGIN_ROOT}/bin/mobius\" hook stop",
             "timeout": 10,
-            "statusMessage": "Checking Mobius completion gate"
+            "statusMessage": "Checking the Mobius Objective completion claim"
           }
         ]
       }
