@@ -1,0 +1,6 @@
+interface:
+  display_name: "Mobius Subagent"
+  short_description: "Delegate bounded work through native subagents"
+  default_prompt: "Use $mobius-subagent to delegate one bounded task through the native Subagent workflow."
+policy:
+  allow_implicit_invocation: true
