@@ -1,8 +1,8 @@
-//! Context-dark, one-way human report rendering.
+//! One-way presentation rendering.
 //!
-//! The application layer supplies an immutable, format-neutral snapshot pinned to both Trail
-//! heads.  This adapter is the only owner of view paths and CSV encoding; reports are never read
-//! back as business input.
+//! The application layer supplies immutable report snapshots, while transport may supply one
+//! interaction summary after Core admission. This adapter owns view paths and encoding. CSV is
+//! never business input; the summary remains advisory Route-design context.
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
@@ -10,16 +10,20 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
+use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::application::service::{ReportCell, ReportHeads, ReportRows, ReportSnapshot};
+use crate::domain::ObjectiveId;
 
 const MOBIUS_DIRECTORY: &str = ".mobius";
 const VIEWS_DIRECTORY: &str = "views";
 const RUNS_DIRECTORY: &str = "runs";
+const INTERACTIONS_DIRECTORY: &str = "interactions";
 const GENERATIONS_DIRECTORY: &str = "generations";
 const CURRENT_FILE: &str = "current.csv";
+const INTERACTION_FILE: &str = "interaction.md";
 const INVALID_CURRENT_PREFIX: &str = ".invalid-current-";
 const REPORT_SCHEMA: &str = "mobius.report.v1";
 const CURRENT_COLUMNS: [&str; 4] = [
@@ -46,6 +50,32 @@ const REPORT_FILES: [&str; 9] = [
 pub(crate) struct ReportScope {
     pub(crate) session_ref: String,
     pub(crate) slug: String,
+}
+
+/// Agent-authored presentation input. It is removed by transport before Core admission.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InteractionSummary {
+    interpreted_intent: String,
+    confirmed_boundaries: String,
+    verified_facts: String,
+    challenges_and_resolutions: String,
+    route_notes: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InteractionAction {
+    Activate,
+    Revise,
+}
+
+impl InteractionAction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Activate => "activate",
+            Self::Revise => "revise",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,6 +192,38 @@ impl ReportRenderer {
         let renderer = Self { views };
         renderer.validate_root()?;
         Ok(renderer)
+    }
+
+    /// Atomically replaces one session-local interaction summary. The file is presentation-only
+    /// and is never read by this renderer or Core.
+    pub(crate) fn write_interaction(
+        &self,
+        scope: &ReportScope,
+        objective: &ObjectiveId,
+        revision: u64,
+        action: InteractionAction,
+        summary: &InteractionSummary,
+    ) -> Result<PathBuf, ReportError> {
+        self.validate_root()?;
+        let session = self.session_path(scope)?;
+        let interactions = session.join(INTERACTIONS_DIRECTORY);
+        let interaction = interactions.join(format!(
+            "{}--{}",
+            encode_component(&scope.slug)?,
+            objective_id_component(objective)?
+        ));
+        ensure_below(&self.views, &interaction)?;
+
+        create_or_verify_directory(&session)?;
+        create_or_verify_directory(&interactions)?;
+        create_or_verify_directory(&interaction)?;
+
+        let path = interaction.join(INTERACTION_FILE);
+        write_atomic_text(
+            &path,
+            &render_interaction(objective, revision, action, summary),
+        )?;
+        Ok(path)
     }
 
     /// Diagnoses the current pointer against the supplied heads and meta file.  It never reads a
@@ -539,11 +601,7 @@ impl ReportRenderer {
         scope: &ReportScope,
         snapshot: &ReportSnapshot,
     ) -> Result<(PathBuf, PathBuf, PathBuf), ReportError> {
-        let session = self.views.join(format!(
-            "codex-session-{}",
-            encode_component(&scope.session_ref)?
-        ));
-        ensure_below(&self.views, &session)?;
+        let session = self.session_path(scope)?;
         let runs = session.join(RUNS_DIRECTORY);
         let run = runs.join(format!(
             "run-{}--{}",
@@ -552,6 +610,15 @@ impl ReportRenderer {
         ));
         ensure_below(&self.views, &run)?;
         Ok((session, runs, run))
+    }
+
+    fn session_path(&self, scope: &ReportScope) -> Result<PathBuf, ReportError> {
+        let session = self.views.join(format!(
+            "codex-session-{}",
+            encode_component(&scope.session_ref)?
+        ));
+        ensure_below(&self.views, &session)?;
+        Ok(session)
     }
 
     fn run_path(
@@ -789,6 +856,70 @@ fn validate_rows(name: &str, rows: &ReportRows) -> Result<(), ReportError> {
     Ok(())
 }
 
+fn render_interaction(
+    objective: &ObjectiveId,
+    revision: u64,
+    action: InteractionAction,
+    summary: &InteractionSummary,
+) -> String {
+    format!(
+        "# Mobius Copilot Interaction\n\n\
+- Objective: {}\n\
+- Revision: {revision}\n\
+- Action: {}\n\n\
+## Interpreted Intent\n\
+{}\n\n\
+## Confirmed Boundaries\n\
+{}\n\n\
+## Verified Facts\n\
+{}\n\n\
+## Challenges and Resolutions\n\
+{}\n\n\
+## Route Notes\n\
+{}\n",
+        objective.as_str(),
+        action.as_str(),
+        summary.interpreted_intent.trim(),
+        summary.confirmed_boundaries.trim(),
+        summary.verified_facts.trim(),
+        summary.challenges_and_resolutions.trim(),
+        summary.route_notes.trim(),
+    )
+}
+
+fn write_atomic_text(path: &Path, contents: &str) -> Result<(), ReportError> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(ReportError::ManagedPathIsSymlink(path.to_path_buf()));
+        }
+        if !metadata.is_file() {
+            return Err(ReportError::ManagedPathIsNotFile(path.to_path_buf()));
+        }
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| ReportError::PathEscapedViews(path.to_path_buf()))?;
+    let temporary = parent.join(format!(".interaction-{}.tmp", Uuid::new_v4()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|source| io_error("create interaction temp file", &temporary, source))?;
+        file.write_all(contents.as_bytes())
+            .and_then(|()| file.flush())
+            .map_err(|source| io_error("write interaction temp file", &temporary, source))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .map_err(|source| io_error("publish interaction file", path, source))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn write_table(path: &Path, rows: &ReportRows) -> Result<(), ReportError> {
     validate_rows(&path.display().to_string(), rows)?;
     let mut file = OpenOptions::new()
@@ -956,7 +1087,11 @@ fn safe_generation_path(run: &Path, relative: &str) -> Result<PathBuf, String> {
 }
 
 fn objective_component(snapshot: &ReportSnapshot) -> Result<String, ReportError> {
-    let identity = snapshot.objective_id.as_str();
+    objective_id_component(&snapshot.objective_id)
+}
+
+fn objective_id_component(objective: &ObjectiveId) -> Result<String, ReportError> {
+    let identity = objective.as_str();
     if identity.is_empty() {
         return Err(ReportError::InvalidPathComponent(
             "Objective identity must not be empty".to_owned(),
@@ -1656,6 +1791,41 @@ mod tests {
         assert!(rendered.contains("session%2F%2E%2E%2Fone"));
         assert!(rendered.contains("objective%20%2F%20safety"));
         assert!(!rendered.contains("/../"));
+
+        let interaction = renderer
+            .write_interaction(
+                &scope(),
+                &ObjectiveId::new("objective/../interaction"),
+                3,
+                InteractionAction::Revise,
+                &InteractionSummary {
+                    interpreted_intent: "intent".to_owned(),
+                    confirmed_boundaries: "boundaries".to_owned(),
+                    verified_facts: "facts".to_owned(),
+                    challenges_and_resolutions: "challenges".to_owned(),
+                    route_notes: "notes".to_owned(),
+                },
+            )
+            .unwrap();
+        assert!(interaction.starts_with(&renderer.views));
+        let interaction_path = interaction.to_string_lossy();
+        assert!(interaction_path.contains("session%2F%2E%2E%2Fone"));
+        assert!(interaction_path.contains("objective%20%2F%20safety--"));
+        assert!(!interaction_path.contains("/../"));
+        let markdown = fs::read_to_string(interaction).unwrap();
+        for section in [
+            "# Mobius Copilot Interaction",
+            "- Objective: objective/../interaction",
+            "- Revision: 3",
+            "- Action: revise",
+            "## Interpreted Intent",
+            "## Confirmed Boundaries",
+            "## Verified Facts",
+            "## Challenges and Resolutions",
+            "## Route Notes",
+        ] {
+            assert!(markdown.contains(section), "interaction omitted {section}");
+        }
     }
 
     #[test]

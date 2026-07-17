@@ -248,6 +248,21 @@ impl CoreService {
         Ok(state)
     }
 
+    pub(crate) fn presentation_objective_head(
+        &self,
+        binding: &ProjectBinding,
+        objective: &ObjectiveId,
+    ) -> Result<u64, ServiceError> {
+        let (_admitted, mut store) = self.open_bound(binding)?;
+        let transaction = store.begin_read().map_err(store_error)?;
+        let objective_seq = transaction
+            .heads(objective)
+            .map_err(store_error)?
+            .objective_seq;
+        transaction.commit().map_err(store_error)?;
+        Ok(objective_seq)
+    }
+
     pub fn capture_artifact(
         &self,
         request: CaptureArtifactRequest,

@@ -14,7 +14,9 @@ use crate::application::service::{
 };
 use crate::domain::{ObjectiveId, ObjectiveState, TransitionKind};
 use crate::error::MobiusError;
-use crate::presentation::report::{ReportRenderer, ReportScope};
+use crate::presentation::report::{
+    InteractionAction, InteractionSummary, ReportRenderer, ReportScope,
+};
 
 const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
@@ -367,18 +369,47 @@ fn apply_transition_with_presentation(
     arguments: Value,
     session_ref: Option<&str>,
 ) -> Result<Value, ServiceError> {
-    let request = serde_json::from_value::<ApplyTransitionRequest>(arguments).map_err(|error| {
-        ServiceError {
-            code: "invalid_tool_input",
-            message: error.to_string(),
-        }
-    })?;
+    let (request, interaction) = decode_apply_transition_arguments(arguments)?;
     let binding = ProjectBinding {
         project_root: request.project_root.clone(),
         project_id: request.project_id.clone(),
     };
     let transition = request.command.kind();
+    let interaction_context = match &request.command {
+        crate::application::commands::MutationCommand::ActivateObjective(input) => {
+            Some((input.objective_spec.revision, InteractionAction::Activate))
+        }
+        crate::application::commands::MutationCommand::ReviseObjective(input) => {
+            Some((input.objective_spec.revision, InteractionAction::Revise))
+        }
+        _ => None,
+    };
+    if interaction.is_some() && interaction_context.is_none() {
+        return Err(ServiceError::new(
+            "invalid_tool_input",
+            "interaction is allowed only with activate_objective or revise_objective",
+        ));
+    }
     let outcome = service.apply_transition(request)?;
+    let interaction_receipt_is_current = outcome.newly_committed
+        || service
+            .presentation_objective_head(&binding, &outcome.response.objective_id)
+            .is_ok_and(|head| head == outcome.response.committed_objective_seq);
+    let interaction_path = match (interaction, interaction_context, session_ref) {
+        (Some(summary), Some((revision, action)), Some(session_ref))
+            if interaction_receipt_is_current =>
+        {
+            best_effort_transition_interaction(
+                &binding,
+                &outcome.response.objective_id,
+                revision,
+                action,
+                &summary,
+                session_ref,
+            )
+        }
+        _ => None,
+    };
     best_effort_transition_report(
         service,
         &binding,
@@ -387,10 +418,51 @@ fn apply_transition_with_presentation(
         outcome.newly_committed,
         session_ref,
     );
-    serde_json::to_value(outcome.response).map_err(|error| ServiceError {
+    let mut response = serde_json::to_value(outcome.response).map_err(|error| ServiceError {
         code: "serialization_error",
         message: error.to_string(),
-    })
+    })?;
+    if let Some(path) = interaction_path.and_then(|path| path.into_os_string().into_string().ok()) {
+        response
+            .as_object_mut()
+            .expect("ApplyTransitionResponse serializes as an object")
+            .insert("interaction_path".to_owned(), Value::String(path));
+    }
+    Ok(response)
+}
+
+fn decode_apply_transition_arguments(
+    mut arguments: Value,
+) -> Result<(ApplyTransitionRequest, Option<InteractionSummary>), ServiceError> {
+    let object = arguments.as_object_mut().ok_or_else(|| {
+        ServiceError::new("invalid_tool_input", "tool arguments must be an object")
+    })?;
+    let interaction = object
+        .remove("interaction")
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| ServiceError::new("invalid_tool_input", error.to_string()))?;
+    let request = serde_json::from_value(arguments)
+        .map_err(|error| ServiceError::new("invalid_tool_input", error.to_string()))?;
+    Ok((request, interaction))
+}
+
+fn best_effort_transition_interaction(
+    binding: &ProjectBinding,
+    objective: &ObjectiveId,
+    revision: u64,
+    action: InteractionAction,
+    summary: &InteractionSummary,
+    session_ref: &str,
+) -> Option<PathBuf> {
+    let renderer = ReportRenderer::initialize(&binding.project_root).ok()?;
+    let scope = ReportScope {
+        session_ref: session_ref.to_owned(),
+        slug: automatic_objective_slug(objective),
+    };
+    renderer
+        .write_interaction(&scope, objective, revision, action, summary)
+        .ok()
 }
 
 /// Runs after Core returns a committed or idempotently replayed response. Only a new commit may
@@ -643,7 +715,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "mobius_apply_transition",
-            "Submit one typed mutation at exact heads. Returns an immutable commit receipt with Objective, transition, committed heads, and event digest. Same request_id+payload is idempotent; stale heads or changed payload return isError=true with mobius.error.v1.",
+            "Submit one typed mutation at exact heads. Activate/revise may include a presentation-only interaction summary and then return interaction_path when written. Returns an immutable Core commit receipt with Objective, transition, committed heads, and event digest. Same request_id+payload is idempotent; stale heads or changed payload return isError=true with mobius.error.v1.",
             apply_transition_schema(),
             apply_transition_output_schema(),
             false,
@@ -767,7 +839,8 @@ fn apply_transition_output_schema() -> Value {
             "transition": {"type": "string"},
             "committed_project_seq": u64_schema(),
             "committed_objective_seq": u64_schema(),
-            "event_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            "event_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "interaction_path": non_empty_string_schema()
         }),
     )
 }
@@ -860,7 +933,8 @@ fn apply_transition_schema() -> Value {
             "project_id": non_empty_string_schema(),
             "expected_heads": heads_schema(),
             "request_id": non_empty_string_schema(),
-            "command": {"oneOf": variants}
+            "command": {"oneOf": variants},
+            "interaction": interaction_summary_schema()
         }),
     );
     schema
@@ -868,6 +942,25 @@ fn apply_transition_schema() -> Value {
         .expect("object_schema always returns an object")
         .insert("$defs".to_owned(), domain_schema_definitions());
     schema
+}
+
+fn interaction_summary_schema() -> Value {
+    object_schema(
+        &[
+            "interpreted_intent",
+            "confirmed_boundaries",
+            "verified_facts",
+            "challenges_and_resolutions",
+            "route_notes",
+        ],
+        json!({
+            "interpreted_intent": {"type": "string"},
+            "confirmed_boundaries": {"type": "string"},
+            "verified_facts": {"type": "string"},
+            "challenges_and_resolutions": {"type": "string"},
+            "route_notes": {"type": "string"}
+        }),
+    )
 }
 
 fn ref_schema(name: &str) -> Value {
@@ -1377,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_registry_is_closed_and_has_no_presentation_surface() {
+    fn tool_registry_is_closed_and_has_no_separate_presentation_tool() {
         let definitions = tool_definitions();
         let names = definitions
             .iter()
@@ -1412,6 +1505,37 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .contains(&json!("maintenance"))
+        );
+    }
+
+    #[test]
+    fn interaction_summary_is_an_optional_apply_only_presentation_field() {
+        let input = apply_transition_schema();
+        assert!(input["properties"]["interaction"].is_object());
+        assert_eq!(
+            input["properties"]["interaction"]["required"],
+            json!([
+                "interpreted_intent",
+                "confirmed_boundaries",
+                "verified_facts",
+                "challenges_and_resolutions",
+                "route_notes"
+            ])
+        );
+        assert!(
+            !input["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("interaction"))
+        );
+
+        let output = apply_transition_output_schema();
+        assert!(output["properties"]["interaction_path"].is_object());
+        assert!(
+            !output["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("interaction_path"))
         );
     }
 
