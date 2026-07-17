@@ -141,3 +141,74 @@ fn ownership_views_and_completion_remain_bounded() {
     assert_eq!(loop_skill.matches("MOBIUS_OBJECTIVE_ACHIEVED:").count(), 1);
     assert!(loop_skill.contains("read-only `mobius audit <project-id>` to be healthy"));
 }
+
+#[test]
+fn copilot_clarifies_intent_and_loop_owns_every_route() {
+    let copilot = read("skills/mobius-copilot/SKILL.md");
+    let elicitation = read("skills/mobius-copilot/references/intent-elicitation.md");
+    let loop_skill = read("skills/mobius-loop/SKILL.md");
+    let interaction_read = read("skills/mobius-loop/references/interaction-read.md");
+
+    for contract in [
+        "references/intent-elicitation.md",
+        "Ask one important question at a time",
+        "not unquestionable decisions",
+        "never asked to design a Map or Route",
+        "`initial_routes` set to `{}`",
+        "top-level `interaction` object",
+        "`interaction_path`",
+    ] {
+        assert!(copilot.contains(contract), "Copilot omitted {contract}");
+    }
+    for contract in [
+        "intended outcome",
+        "observable criteria",
+        "unresolved tensions",
+        "Stop asking when the remaining uncertainty concerns only how to execute a Route",
+        "not a transcript",
+    ] {
+        assert!(
+            elicitation.contains(contract),
+            "elicitation recipe omitted {contract}"
+        );
+    }
+    for contract in [
+        "design every Route",
+        "All initial, added, and replacement Routes",
+        "references/interaction-read.md",
+        "Only while preparing an `AddRoute`",
+        "current `SeekingRoute` Stage",
+    ] {
+        assert!(loop_skill.contains(contract), "Loop omitted {contract}");
+    }
+    for contract in [
+        "exactly one path matches both",
+        "fixed leading metadata block through `- Action:`",
+        "current Core state + ObjectiveSpec + Map + StructuralContext",
+        "> project facts reverified now",
+        "> interaction.md background and hints",
+        "cannot be Evidence, Judgment, Decision, proof, completion, Map recovery",
+        "sole main-agent exception",
+        "read another view as business input",
+    ] {
+        assert!(
+            interaction_read.contains(contract),
+            "interaction read recipe omitted {contract}"
+        );
+    }
+
+    let ownership_contract = format!("{copilot}\n{elicitation}\n{loop_skill}");
+    for contradiction in [
+        "ask the human to design a Map",
+        "ask the human to design a Route",
+        "human confirms the Map",
+        "human confirms the Route",
+        "Copilot designs every Route",
+        "Copilot designs the initial Route",
+    ] {
+        assert!(
+            !ownership_contract.contains(contradiction),
+            "Route ownership contract contains contradiction: {contradiction}"
+        );
+    }
+}
