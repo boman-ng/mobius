@@ -53,7 +53,10 @@ state are derived projection values, never independent facts.
 
 `ObjectKnowledge` is a read-only newtype outside the domain owner. Its checked insertion derives
 the key from the value identity and rejects structural rebinding. `DomainConfiguration` exposes
-read-only accessors; only the reducer and replay path construct trusted configurations.
+read-only accessors. Only reducer and replay construct authoritative configurations. SQLite
+projections serialize these values as rebuildable observations; direct Agent SQL can inspect them
+but never hydrates a second authoritative configuration or supplies admissible transition input.
+Full audit and rebuild own Trail-to-projection equivalence.
 
 ## Transition Mapping
 
@@ -80,6 +83,12 @@ locked admission prestate.
 always derived from the `TransitionInput` variant, never stored as a second discriminator. Replay
 rejects mixed Objective streams and facts whose Objective is inconsistent with the activation
 payload, the current stream, or an Objective-bearing input.
+
+Agent SQL rows are not persistent model mappings. Ordinary queries select only the exact state
+fields, identities, or bounded Trail range needed at the current heads. Formal Review follows the
+frozen Packet/dependency identity closure; formal Wait returns count/bytes from one snapshot and
+emits all matching Evidence only when the complete set fits its Context budget. A projection row never changes object identity, authorizes a write, or
+becomes admissible transition input by itself.
 
 Human confirmation for Activate and Revise contains the exact typed ObjectiveSpec payload, action,
 project identity, and expected project/objective heads. Abandon confirmation contains the exact

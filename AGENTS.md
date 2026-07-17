@@ -53,7 +53,7 @@ do not silently redefine the blueprint through tests or implementation convenien
 - Maintain one SQLite database at `<canonical-project-root>/.mobius/mobius.sqlite3` when Phase 2
   exists. Do not add home, XDG, system-temp, or global fallback state.
 - Fail closed at every review, artifact-integrity, stale-head, confirmation, and parser boundary.
-- Keep CLI read/audit/doctor/report/hook adapters free of business mutation commands.
+- Keep CLI audit/doctor/report/hook adapters free of business mutation commands.
 - Do not add a Python runtime, fallback, compatibility shim, parallel ledger, sidecar, second
   executable, or v0.5 import path.
 - Preserve explicit user activation: model skills apply only to explicitly targeted Mobius

@@ -2,6 +2,22 @@
 
 All notable changes to Mobius are documented here.
 
+## Unreleased
+
+- Make the project SQLite store explicit as an append-only Trail with rebuildable projections and
+  document its stable five-table Agent read contract.
+- Remove the Agent ORM, CLI read mode, MCP read and artifact-read tools, cursor/chunk DTOs, and their
+  compatibility surface. Agents now use one canonical SQLite 3.40.1+ safe read-only command.
+- Keep MCP focused on four validated writes: project initialization, artifact capture, typed
+  transition, and explicit maintenance; read-only audit remains CLI-only. Remove unreachable audit
+  cursor/digest metadata instead of exposing a continuation that no supported caller can use.
+- Add two-stage SQLite/shell literal encoding, targeted SQL guidance, recursively complete Review
+  closure, single-snapshot count/byte-admitted Wait enumeration, stale-head rechecks, and a Hook
+  exception for only the literal supported SQLite command shape. Executable contracts cover
+  pathological identities, a convergent multi-level Review DAG, and admitted/denied/truncated Wait.
+- Bound each complete Subagent result with one serialized-byte budget and deduplicate fan-out while
+  keeping model selection and work routing advisory and main-Agent owned.
+
 ## 1.0.0 - 2026-07-16
 
 - Archive the complete v0.5.0 release tree outside the active source path.

@@ -27,6 +27,13 @@ The design has three owners with one-way composition:
 - Main Agent Composition interprets open-world work, translates observations into typed Evidence,
   forms formal Judgments, and submits guarded commands to Core.
 
+Core persistence is one project-local append-only SQLite Trail plus transactionally maintained,
+rebuildable projections. The main Agent reads that database directly with a canonical SQLite
+3.40.1-or-newer CLI in safe, read-only, query-only mode and selects only the rows needed for its
+current decision. MCP has one purpose: validate initialization, artifact capture, typed transitions,
+and explicit maintenance. This keeps audit facts available without imposing a second read protocol
+or selecting the Agent's Route or work method.
+
 The authoritative blueprints are:
 
 - `dev/mobius-model.md`
@@ -39,8 +46,9 @@ The active tree contains one Cargo package with one `mobius` binary target, the
 `mobius-copilot` and `mobius-loop` Model skills, the independent Subagent skill, project-bound
 SQLite and artifact stores, the Core service, public stdio MCP, read-only operational CLI modes,
 context-dark reports, and narrow hooks. Direct and delegated Composition loops are tested through
-the real MCP process; the delegated lane keeps worker output candidate-only and lets only main
-construct typed Core input. Detailed evidence and the supported-host boundary are recorded in
+the real MCP process with read-only SQLite observation; the delegated lane keeps worker output
+candidate-only and lets only main construct typed Core input. Detailed evidence and the
+supported-host boundary are recorded in
 `dev/v1-implementation-status.md`.
 
 `mobius-copilot` exclusively manages human-authorized Objective activation, revision,
@@ -70,6 +78,8 @@ codex plugin add mobius@mobius
 
 Start a new Codex thread after installation so the v1 Skills, MCP server, and Hooks load from the
 installed plugin cache. Review and trust the packaged Hooks before using Mobius on a project.
+The host must provide a canonical absolute `sqlite3` executable at version 3.40.1 or newer; Mobius
+does not bundle or download one.
 
 ## Release Artifact Contract
 
@@ -78,15 +88,15 @@ contains the plugin at `plugins/mobius/` and exactly one executable at
 `plugins/mobius/bin/mobius`. The manifest selects the MCP and hook configs, and both configs invoke
 that same executable through paths relative to the installed plugin root.
 The installed bundle excludes Rust source, development tests, Python, a SQLite CLI, launchers,
-downloaders, and helper executables.
+downloaders, and helper executables. The host SQLite prerequisite is deliberately external.
 
 CI copies the assembled plugin into an isolated Codex-style cache and starts both `--help` and the
-stdio MCP initialize handshake with an empty environment and an unusable `PATH`. The release-host
-gate admits stable Codex CLI versions `>=0.143.0`, then installs the marketplace through the actual
-host, verifies the resolved cache command and cwd, and runs complete direct and delegated MCP loops
-to `Achieved` under `PATH=/nonexistent`. The minimum version is an admission floor; every actual
-release host must pass the full gate. The checked-in marketplace stays unavailable; only the
-assembled copy is marked `AVAILABLE`.
+stdio MCP initialize handshake with an empty environment. The release-host gate admits stable
+Codex CLI versions `>=0.143.0`, verifies the external SQLite prerequisite, installs the marketplace
+through the actual host, verifies the resolved cache command and cwd, and runs complete direct and
+delegated MCP-write/SQLite-read loops to `Achieved`. The minimum version is an admission floor;
+every actual release host must pass the full gate. The checked-in marketplace stays unavailable;
+only the assembled copy is marked `AVAILABLE`.
 
 ## Verification
 
