@@ -16,8 +16,24 @@ require the declared distinct identity count to equal the returned distinct row 
 extra, missing, duplicate, or identity-mismatched rows. Use exact-identity queries in short read
 transactions, never an all-Evidence scan.
 
-For every `core_snapshot` in the closure, derive the blob name from its canonical SHA-256 digest,
-verify the file's digest and size, then inspect only the byte range needed for the Judgment.
+For every `core_snapshot` in the closure, require exactly `digest` and `size_bytes`. Accept `digest`
+only as `sha256:` followed by 64 lowercase hexadecimal characters and accept `size_bytes` only as a
+non-negative integer. Strip only the `sha256:` prefix and construct this sole locator from the
+already canonical project root:
+
+```text
+<canonical-project-root>/.mobius/artifacts/blobs/<digest-hex>
+```
+
+Before inspecting content, use the host's literal, non-writing filesystem operations to reject a
+missing path, symlink, non-regular file, escaped canonical path, size mismatch, or full-file SHA-256
+mismatch. Hash the file as a stream; do not place the full blob in Context. After that verification,
+read only one explicitly chosen `[offset, offset + length)` range needed for the Judgment, require
+the range to be within `size_bytes`, and reject short or truncated output. Repeat the regular-file,
+canonical-path, full digest, and size verification after the range read; any change or unverifiable
+check invalidates the material. Shell paths, when a shell adapter is used, must be encoded with the
+parent Skill's `shell_word` rule and must never contain raw stored text. This procedure is
+observational only; no Agent operation may create, rename, rewrite, chmod, or delete the blob.
 
 Only decide after the frozen closure is complete and inspected. Re-read both heads and the current
 Packet identity after constructing it; any change invalidates the closure. Missing material,
