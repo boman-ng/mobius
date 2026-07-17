@@ -5,8 +5,9 @@ description: Manage one explicitly requested Mobius Objective contract and its i
 
 # Mobius Copilot
 
-Own the human-authorized Objective contract. Let SQLite expose facts, the main agent make semantic
-decisions, and Core validate every write. Leave execution of an installed Map to `$mobius-loop`.
+Own the human-authorized Objective contract. Clarify intent before drafting it, let SQLite expose
+facts, let the main agent make semantic decisions, and let Core validate every write. Leave Route
+design and execution for an installed Map to `$mobius-loop`.
 
 ## Activate only on explicit intent
 
@@ -22,7 +23,8 @@ Use exactly four MCP tools, and only for writes:
 - `mobius_audit` — explicit `rebuild_projection` or `artifact_gc` maintenance only
 
 Read-only audit uses `mobius audit <project-id>`. Reports and CSV files are presentation, never
-business input. Only the main agent may submit a Mobius write.
+business input. `interaction.md` is only a later Route-design reference under `$mobius-loop`.
+Only the main agent may submit a Mobius write.
 
 ## Read state directly
 
@@ -89,6 +91,25 @@ the revision. Shape one minimal Map that covers every Criterion exactly once, ha
 dependencies and complete Stage contracts, and includes final integration. Do not encode a fixed
 work method, worker topology, or routing policy.
 
+## Clarify intent before drafting
+
+For activation or revision, read
+[`references/intent-elicitation.md`](references/intent-elicitation.md) and follow it before showing
+the typed contract. Inspect discoverable project and Core facts first. Treat human statements as
+important input, not unquestionable decisions: distinguish outcomes, facts, constraints,
+preferences, and candidate implementations; challenge contradictions and premature solution
+constraints with concise evidence.
+
+Ask one important question at a time only when its answer can change the ObjectiveSpec or Map. Stop
+when the outcome, observable Criteria, boundaries, excluded claims, and Map feasibility are clear;
+do not keep interviewing for Route-only details. First show a short interpretation summary for
+correction. Human confirmation then applies to the complete typed Objective action and
+ObjectiveSpec under the existing exact binding rule.
+
+The main agent designs the ObjectiveSpec and Initial/SpecRevised Map. The human supplies intent and
+preferences but is never asked to design a Map or Route. Keep implementation preferences and
+unverified hypotheses in Route Notes rather than promoting them into the Objective contract.
+
 ## Bind human confirmation
 
 Before `ActivateObjective`, `ReviseObjective`, or `Abandon`:
@@ -101,10 +122,22 @@ Before `ActivateObjective`, `ReviseObjective`, or `Abandon`:
 Any payload or head change voids confirmation. An already committed `Mapping` state is durable and
 does not require reconfirming the preceding contract transition.
 
+## Preserve the accepted understanding
+
+With an `ActivateObjective` or `ReviseObjective` call, include the final Working Set as the optional
+top-level `interaction` object described in the elicitation reference. It is a presentation-only
+summary beside `command`; it is not part of the ObjectiveSpec, confirmation, Trail, or Core request
+hash. Include no transcript, hidden reasoning, tool dump, secret, or unverified completion claim.
+
+After a successful transition, retain the returned `interaction_path` when present and hand that
+exact path to `$mobius-loop`. A missing path does not change the accepted transition and is not a
+reason to replay or revise business state.
+
 ## Submit one normal branch
 
-- `Initial`: Copilot installs the Map after accepted activation.
-- `SpecRevised`: Copilot installs the replacement Map after accepted revision.
+- `Initial`: Copilot installs the Map after accepted activation with `initial_routes` set to `{}`.
+- `SpecRevised`: Copilot installs the replacement Map after accepted revision with `initial_routes`
+  set to `{}`.
 - `Remap` or `WaitRevealedDrift`: hand Map installation to `$mobius-loop`.
 - Abandonment submits only the confirmed reason and stops at `Abandoned`.
 
