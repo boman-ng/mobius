@@ -391,6 +391,7 @@ fn role_and_model_policy_remain_semantic_and_driver_is_unpinned() {
             "current host-available research-capable model / `medium`",
             "current host-available reliable coding model / `high`",
             "current host-available strong reasoning model / `medium`",
+            "currently Runtime-advertised external Judge agent profile",
             "Let the host Runtime resolve model and effort",
             "advisory execution policy, not an availability guarantee or a fixed model catalog",
             "Never pin a Driver-specific model or effort.",
@@ -400,5 +401,42 @@ fn role_and_model_policy_remain_semantic_and_driver_is_unpinned() {
     assert!(
         !skill.contains("gpt-") && !skill.contains("o3") && !skill.contains("o4"),
         "the skill must not hardcode a time-sensitive model catalog"
+    );
+}
+
+#[test]
+fn external_judge_requires_a_runtime_advertised_external_profile() {
+    let skill = read(&skill_root().join("SKILL.md"));
+    assert_contains_all(
+        &skill,
+        "external Judge profile policy",
+        &[
+            "Consider an external Judge only when an uncovered review question",
+            "current Runtime advertises as external or independent",
+            "report the external Judge as unavailable",
+            "must never be labeled, counted, or reported as an external Judge",
+            "Do not discover or parse external profiles from any filesystem path or configuration file",
+            "including `~/.codex/agents`",
+            "enumerate provider models",
+            "maintain a profile registry",
+            "call a provider directly",
+            "Do not hardcode a provider, model, or profile name in this skill.",
+            "Default to one external Judge",
+            "Before spawning any member of a multi-profile fanout",
+            "fully predeclare one finite profile set",
+            "assign each profile a distinct uncovered question, failure model, or counterargument",
+            "divide one finite total result budget among them",
+            "Invoke the selected profile by its Runtime identity",
+            "let the Runtime apply its provider, model, effort, sandbox, and permission configuration",
+            "Treat spawn as the authoritative availability check",
+            "A missing, changed, or unresolvable profile identity, spawn failure, timeout, interruption, invalid result, or missing final output",
+            "makes that execution unavailable or degraded",
+            "report that condition separately instead of manufacturing a Judge result envelope",
+            "Never replace an unavailable external profile with the closest model, an internal profile, another transport, or a fabricated successful result.",
+        ],
+    );
+    assert!(
+        !skill.contains("Kimi") && !skill.contains("CC-Switch"),
+        "the generic skill must remain provider and external-profile neutral"
     );
 }

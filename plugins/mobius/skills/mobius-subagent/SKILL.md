@@ -25,11 +25,21 @@ Use this skill when delegation is requested or the main agent determines that de
 | `researcher` | Investigate authoritative open-world sources | Read-only workspace; authorized network reads | A current host-available research-capable model / `medium` |
 | `driver` | Continue the main agent's work on one bounded change | Only effects explicitly authorized by the task | Let the host Runtime resolve model and effort |
 | `verifier` | Independently reproduce, test, observe, and compare | Read-only by default; declared temporary test effects | A current host-available reliable coding model / `high` |
-| `judge` | Challenge frozen materials and return advisory findings | Read-only | Internal: a current host-available strong reasoning model / `medium`; external: an available independent model |
+| `judge` | Challenge frozen materials and return advisory findings | Read-only | Internal: a current host-available strong reasoning model / `medium`; external: a currently Runtime-advertised external Judge agent profile |
 
-Treat this capability-based matrix as advisory execution policy, not an availability guarantee or a fixed model catalog. Resolve it against the host's current supported models. Confirm an explicitly requested model and effort before use and select the closest currently available configuration when necessary. Never pin a Driver-specific model or effort.
+Treat this capability-based matrix as advisory execution policy, not an availability guarantee or a fixed model catalog. Resolve ordinary capability profiles against the host's current supported models. Confirm an explicitly requested model and effort before use and select the closest currently available configuration when necessary, except for an external Judge. Never pin a Driver-specific model or effort.
 
 Select a role by its work function, never by inferring identity from the model that actually runs it.
+
+### Select external Judge profiles
+
+- Consider an external Judge only when an uncovered review question would materially benefit from an independent model-family perspective.
+- Select only a native agent profile that the current Runtime advertises as external or independent and whose advertised purpose and capabilities fit the read-only Judge task. Treat the Runtime profile identity and advertisement as selection-time facts; do not infer externality from a profile name or an unadvertised model identity.
+- If the Runtime advertises no qualifying external profile, report the external Judge as unavailable. An internal model may serve as an internal Judge, but must never be labeled, counted, or reported as an external Judge.
+- Do not discover or parse external profiles from any filesystem path or configuration file, including `~/.codex/agents`; do not enumerate provider models, maintain a profile registry, or call a provider directly. Do not hardcode a provider, model, or profile name in this skill.
+- Default to one external Judge after the independent-perspective gate passes. Before spawning any member of a multi-profile fanout, fully predeclare one finite profile set, assign each profile a distinct uncovered question, failure model, or counterargument, and divide one finite total result budget among them. Do not add a Judge that has no expected new information value.
+- Invoke the selected profile by its Runtime identity and let the Runtime apply its provider, model, effort, sandbox, and permission configuration. Never replace an unavailable external profile with the closest model, an internal profile, another transport, or a fabricated successful result.
+- Treat spawn as the authoritative availability check. A missing, changed, or unresolvable profile identity, spawn failure, timeout, interruption, invalid result, or missing final output makes that execution unavailable or degraded; report that condition separately instead of manufacturing a Judge result envelope. Let the caller's policy decide whether work may continue without that external advice.
 
 Read [role profiles](references/role-profiles.md) after selecting a role. Load the selected role's complete input/output template and rules; do not ask the worker to find or read this reference.
 
