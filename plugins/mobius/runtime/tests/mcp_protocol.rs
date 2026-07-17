@@ -327,6 +327,26 @@ fn activation_arguments(
     })
 }
 
+fn interaction_summary(label: &str) -> Value {
+    json!({
+        "interpreted_intent": format!("understand {label}"),
+        "confirmed_boundaries": "- local project only",
+        "verified_facts": "- verified from current source",
+        "challenges_and_resolutions": "- separated the outcome from a candidate tactic",
+        "route_notes": format!("- investigate {label} while designing the Route")
+    })
+}
+
+fn core_receipt(value: &Value) -> Value {
+    json!({
+        "objective_id": value["objective_id"],
+        "transition": value["transition"],
+        "committed_project_seq": value["committed_project_seq"],
+        "committed_objective_seq": value["committed_objective_seq"],
+        "event_digest": value["event_digest"]
+    })
+}
+
 fn automatic_report_map(objective_id: &str, revision: u64, include_followup: bool) -> Value {
     let primary_stage_id = "stage-auto-report-primary";
     let primary_criterion_id = "criterion-auto-report";
@@ -2225,19 +2245,23 @@ fn official_thread_metadata_drives_only_best_effort_post_commit_reports() {
     let project_id = assert_tool_success(&initialized)["project_id"]
         .as_str()
         .unwrap();
+    let mut activation = activation_arguments(
+        &root,
+        project_id,
+        "objective-no-session",
+        "no-session-activate",
+    );
+    activation["interaction"] = interaction_summary("an interaction without a session");
     let activated = call_tool(
         &mut process,
         11,
         "mobius_apply_transition",
-        activation_arguments(
-            &root,
-            project_id,
-            "objective-no-session",
-            "no-session-activate",
-        ),
+        activation,
         &root,
     );
-    assert_eq!(assert_tool_success(&activated)["committed_project_seq"], 1);
+    let activated = assert_tool_success(&activated);
+    assert_eq!(activated["committed_project_seq"], 1);
+    assert!(activated.get("interaction_path").is_none());
     assert_eq!(fs::read_dir(root.join(".mobius/views")).unwrap().count(), 0);
     process.finish();
 
@@ -2262,24 +2286,230 @@ fn official_thread_metadata_drives_only_best_effort_post_commit_reports() {
         b"blocks only the derived run path",
     )
     .unwrap();
+    let mut activation = activation_arguments(
+        &root,
+        &project_id,
+        "objective-broken-view",
+        "broken-view-activate",
+    );
+    activation["interaction"] = interaction_summary("a presentation write failure");
     let activated = call_tool_with_thread(
         &mut process,
         21,
         "mobius_apply_transition",
-        activation_arguments(
-            &root,
-            &project_id,
-            "objective-broken-view",
-            "broken-view-activate",
-        ),
+        activation,
         &root,
         Some("broken-thread"),
     );
-    assert_eq!(assert_tool_success(&activated)["committed_project_seq"], 1);
+    let activated = assert_tool_success(&activated);
+    assert_eq!(activated["committed_project_seq"], 1);
+    assert!(activated.get("interaction_path").is_none());
     let read = objective_projection(&root, "objective-broken-view");
     assert_eq!(
         read["objective_state"]["mapping"]["objective"],
         "objective-broken-view"
+    );
+    process.finish();
+}
+
+#[test]
+fn accepted_objective_interactions_write_one_deletable_route_design_summary() {
+    let workspace = Workspace::new();
+    let launcher_workspace = Workspace::new();
+    let root = workspace.path().canonicalize().unwrap();
+    let mut process = McpProcess::spawn(launcher_workspace.path());
+    process.initialize();
+    process.notify("notifications/initialized", json!({}));
+
+    let initialized = call_tool_with_thread(
+        &mut process,
+        2,
+        "mobius_project_init",
+        json!({"project_root": root, "request_id": "interaction-init"}),
+        &root,
+        Some("thread-copilot-interaction"),
+    );
+    let project_id = assert_tool_success(&initialized)["project_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let objective_id = "objective-copilot-interaction";
+    let mut activation =
+        activation_arguments(&root, &project_id, objective_id, "interaction-activate");
+    activation["interaction"] = interaction_summary("the initial intent");
+    let activated = call_tool_with_thread(
+        &mut process,
+        3,
+        "mobius_apply_transition",
+        activation.clone(),
+        &root,
+        Some("thread-copilot-interaction"),
+    );
+    let activated_value = assert_tool_success(&activated).clone();
+    let interaction_path = PathBuf::from(
+        activated_value["interaction_path"]
+            .as_str()
+            .expect("accepted interaction returns its path"),
+    );
+    assert!(interaction_path.starts_with(
+        root.join(".mobius/views/codex-session-thread-copilot-interaction/interactions")
+    ));
+    assert_eq!(
+        interaction_path.file_name().and_then(|name| name.to_str()),
+        Some("interaction.md")
+    );
+    let activated_markdown = fs::read_to_string(&interaction_path).unwrap();
+    assert!(activated_markdown.contains("- Objective: objective-copilot-interaction"));
+    assert!(activated_markdown.contains("- Revision: 1"));
+    assert!(activated_markdown.contains("understand the initial intent"));
+
+    let mut idempotent_activation = activation.clone();
+    idempotent_activation["interaction"] = interaction_summary("the current replayed intent");
+    let replayed = call_tool_with_thread(
+        &mut process,
+        30,
+        "mobius_apply_transition",
+        idempotent_activation,
+        &root,
+        Some("thread-copilot-interaction"),
+    );
+    let replayed_value = assert_tool_success(&replayed);
+    assert_eq!(core_receipt(replayed_value), core_receipt(&activated_value));
+    assert_eq!(
+        replayed_value["interaction_path"],
+        activated_value["interaction_path"]
+    );
+    let replayed_markdown = fs::read_to_string(&interaction_path).unwrap();
+    assert!(replayed_markdown.contains("understand the current replayed intent"));
+    assert!(!replayed_markdown.contains("understand the initial intent"));
+
+    let revision_command = json!({
+        "revise_objective": {
+            "objective_spec": objective_spec(objective_id, 2),
+            "confirmation": {
+                "project": project_id,
+                "action": "revise",
+                "objective_spec": {"objective": objective_id, "revision": 2},
+                "confirmed_payload": objective_spec(objective_id, 2),
+                "heads": {"expected_project_seq": 1, "expected_objective_seq": 1},
+                "confirmed": true
+            }
+        }
+    });
+    let mut rejected_arguments = json!({
+        "project_root": root,
+        "project_id": project_id,
+        "expected_heads": {"expected_project_seq": 0, "expected_objective_seq": 0},
+        "request_id": "interaction-revise-rejected",
+        "command": revision_command,
+        "interaction": interaction_summary("a rejected revision")
+    });
+    rejected_arguments["command"]["revise_objective"]["confirmation"]["heads"] =
+        json!({"expected_project_seq": 0, "expected_objective_seq": 0});
+    let rejected = call_tool_with_thread(
+        &mut process,
+        4,
+        "mobius_apply_transition",
+        rejected_arguments,
+        &root,
+        Some("thread-copilot-interaction"),
+    );
+    assert_eq!(rejected["result"]["isError"], true);
+    assert_eq!(
+        fs::read_to_string(&interaction_path).unwrap(),
+        replayed_markdown
+    );
+
+    let revised = call_tool_with_thread(
+        &mut process,
+        5,
+        "mobius_apply_transition",
+        json!({
+            "project_root": root,
+            "project_id": project_id,
+            "expected_heads": {"expected_project_seq": 1, "expected_objective_seq": 1},
+            "request_id": "interaction-revise",
+            "command": revision_command,
+            "interaction": interaction_summary("the revised intent")
+        }),
+        &root,
+        Some("thread-copilot-interaction"),
+    );
+    let revised_path = PathBuf::from(
+        assert_tool_success(&revised)["interaction_path"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_eq!(revised_path, interaction_path);
+    let revised_markdown = fs::read_to_string(&revised_path).unwrap();
+    assert!(revised_markdown.contains("- Revision: 2"));
+    assert!(revised_markdown.contains("- Action: revise"));
+    assert!(revised_markdown.contains("understand the revised intent"));
+    assert!(!revised_markdown.contains("understand the initial intent"));
+
+    let mut stale_activation = activation;
+    stale_activation["interaction"] = interaction_summary("a stale activation replay");
+    let stale_replay = call_tool_with_thread(
+        &mut process,
+        6,
+        "mobius_apply_transition",
+        stale_activation,
+        &root,
+        Some("thread-copilot-interaction"),
+    );
+    let stale_value = assert_tool_success(&stale_replay);
+    assert_eq!(core_receipt(stale_value), core_receipt(&activated_value));
+    assert!(stale_value.get("interaction_path").is_none());
+    assert_eq!(
+        fs::read_to_string(&interaction_path).unwrap(),
+        revised_markdown
+    );
+
+    let reason = "interaction is forbidden on abandonment";
+    let forbidden = call_tool_with_thread(
+        &mut process,
+        7,
+        "mobius_apply_transition",
+        json!({
+            "project_root": root,
+            "project_id": project_id,
+            "expected_heads": {"expected_project_seq": 2, "expected_objective_seq": 2},
+            "request_id": "interaction-forbidden-abandon",
+            "command": {
+                "abandon": {
+                    "reason": reason,
+                    "confirmation": {
+                        "project": project_id,
+                        "objective": objective_id,
+                        "reason": reason,
+                        "heads": {"expected_project_seq": 2, "expected_objective_seq": 2},
+                        "confirmed": true
+                    }
+                }
+            },
+            "interaction": interaction_summary("a forbidden transition")
+        }),
+        &root,
+        Some("thread-copilot-interaction"),
+    );
+    assert_eq!(forbidden["result"]["isError"], true);
+    assert_eq!(
+        forbidden["result"]["structuredContent"]["code"],
+        "invalid_tool_input"
+    );
+    assert_eq!(
+        fs::read_to_string(&interaction_path).unwrap(),
+        revised_markdown
+    );
+
+    fs::remove_file(&revised_path).unwrap();
+    assert!(!revised_path.exists());
+    let audit = readonly_audit(&root, &project_id);
+    assert_eq!(audit["status"], "healthy");
+    assert_eq!(audit["project_seq"], 2);
+    assert_eq!(
+        objective_projection(&root, objective_id)["objective_state"]["mapping"]["objective"],
+        objective_id
     );
     process.finish();
 }
