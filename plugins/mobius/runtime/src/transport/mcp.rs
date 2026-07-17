@@ -391,10 +391,9 @@ fn apply_transition_with_presentation(
         ));
     }
     let outcome = service.apply_transition(request)?;
-    let interaction_receipt_is_current = outcome.newly_committed
-        || service
-            .presentation_objective_head(&binding, &outcome.response.objective_id)
-            .is_ok_and(|head| head == outcome.response.committed_objective_seq);
+    let interaction_receipt_is_current = service
+        .presentation_objective_head(&binding, &outcome.response.objective_id)
+        .is_ok_and(|head| head == outcome.response.committed_objective_seq);
     let interaction_path = match (interaction, interaction_context, session_ref) {
         (Some(summary), Some((revision, action)), Some(session_ref))
             if interaction_receipt_is_current =>
