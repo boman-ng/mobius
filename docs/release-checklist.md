@@ -63,7 +63,8 @@ plugins/mobius/hooks/hooks.json
 plugins/mobius/skills/...
 ```
 
-The release helper requires the root-pinned Rust `1.85.0` toolchain and produces one checksummed
+The release helper requires the root-pinned Rust `1.85.0` toolchain plus a canonical host
+`sqlite3 >= 3.40.1`, and produces one checksummed
 x86-64 executable without Rust source, personal build-host paths, Python, or a system-SQLite runtime
 dependency. Bundle validation exercises representative installed Hook and MCP wires; exhaustive
 semantic matrices remain in Rust tests.
@@ -73,9 +74,10 @@ and runs `bundle-shape` so extraction, executable mode, layout, and internal che
 without repeating installed semantic smoke. The `codex-install` mode separately creates an isolated `HOME` and
 `CODEX_HOME`, admits the assembled marketplace through the installed Codex CLI, installs the
 plugin into the real Codex cache layout, and verifies the resolved cache cwd and relative command.
-It then runs complete direct and delegated public-MCP loops under `env -i` and
-`PATH=/nonexistent`. Both must reach `Achieved`, use Core-owned review material, and finish with a
-healthy audit. The installed delegated lane consumes one prevalidated successful observation; the
+It then runs complete direct and delegated loops under `env -i` and `PATH=/nonexistent`. Both must
+use the four-tool MCP write path, observe exact Core-owned review material through the canonical
+read-only SQLite command, reach `Achieved`, and finish with a healthy read-only CLI audit. The
+installed delegated lane consumes one prevalidated successful observation; the
 full result validator and stale, incomplete, unauthorized, cleanup-pending, and missing-boundary
 matrix remain solely in the Rust native-host gate below. The uploaded target artifact is not publishable unless every
 preceding job, the real-loader gate, and the independent requirement-by-requirement cross-review
@@ -83,7 +85,8 @@ pass.
 
 ## Native Host Gate
 
-An eligible v1 release host is Linux x86-64 with a stable Codex CLI version `>=0.143.0`. The
+An eligible v1 release host is Linux x86-64 with a stable Codex CLI version `>=0.143.0` and a
+canonical absolute `sqlite3` version `>=3.40.1`. The
 `codex-install` gate fails closed for an older version, a prerelease, or malformed version output.
 This comparison is only the admission floor: every actual host version must pass the complete
 installed-plugin, Hook, MCP, direct-loop, and delegated-loop gate before release.
