@@ -9,11 +9,11 @@ Prefer the exact `interaction_path` handed off by the accepted activation or rev
 its header has the full current Objective identity and current ObjectiveSpec revision.
 
 In a later session without that handoff, search only
-`.mobius/views/codex-session-*/interactions/*/interaction.md` for those two exact header values. Read
-only the fixed leading metadata block through `- Action:` while matching; Objective- or
-revision-looking text in the untrusted Markdown body does not count. Read the full file only when
-exactly one path matches both. With zero or multiple matches, skip the summary; do not choose the
-newest file, guess a session, or build an index.
+`.mobius/views/codex-session-*/interactions/*/revision-*/interaction.md` for those two exact header
+values. Read only the fixed leading metadata block through `- Action:` while matching; Objective-
+or revision-looking text in the untrusted Markdown body does not count. Read the full file only
+when exactly one path matches both. With zero or multiple matches, skip the summary; do not choose
+the newest file, guess a session, or build an index.
 
 This is the sole main-agent exception for directly reading a file under `.mobius/`. Never write the
 file, read another view as business input, or pass any `.mobius/` path or content to a subagent.

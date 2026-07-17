@@ -10,8 +10,8 @@ All notable changes to Mobius are documented here.
 - Make the Loop main Agent design every initial, added, and replacement Route. Initial and
   specification-revision Maps now install with no predesigned Routes.
 - Preserve the accepted understanding as one simple, deletable `interaction.md` per
-  session/Objective. The summary stays outside Core hashes and Trail, is written only after an
-  accepted current transition, and is advisory input only while designing a Route.
+  session/Objective revision. The summary stays outside Core hashes and Trail, is written only
+  for an accepted current receipt, and is advisory input only while designing a Route.
 - Select external Subagent Judges only from qualifying Runtime-advertised profiles, keep provider
   configuration Runtime-owned, and report unavailable or degraded profiles without substitution.
 - Remove obsolete v1 status and typed-mapping snapshots; the three blueprints, executable gates,
