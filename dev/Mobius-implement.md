@@ -190,8 +190,10 @@ project 中创建、识别和维护的唯一 SQLite 数据库，容纳全部 Obj
 “私有缓存”表示该目录由 Mobius 独占管理、对其他模块不透明，并应整体排除在 Git 之外；它不表示全部内容
 都可丢弃。`trail_events`、binding 与已被 Trail 引用的 artifact 是持久事实，删除会造成真实数据丢失；只有
 projection、staging、`views/` 和明确判定为 unreachable 的 blob 才能按本蓝图的 rebuild 或显式清理规则处理。只有
-Core-owned service、artifact adapter 与 report renderer 可以写各自区域；普通文件工具、skill、main Agent 与
-subagent 都不得解析或直接修改该目录。Private 也不等同于加密或秘密存储，敏感材料仍须遵守 host 的数据边界。
+Core-owned service、artifact adapter 与 report renderer 可以写各自区域；main Agent 只能执行第 4.7 节定义的
+canonical SQLite observation，以及 formal Review 对 exact `core_snapshot` 所需的 digest/size 校验和必要 byte-range
+读取。除此之外，普通文件工具、Skill 与 main Agent 都不得解析或直接修改该目录；subagent 不得以任何方式访问
+`.mobius/`。Private 也不等同于加密或秘密存储，敏感材料仍须遵守 host 的数据边界。
 
 首次初始化由 host 从 allowed workspace roots 中选择一个 root，并建立 binding：
 
