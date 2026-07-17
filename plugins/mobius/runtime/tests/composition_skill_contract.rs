@@ -183,6 +183,7 @@ fn copilot_clarifies_intent_and_loop_owns_every_route() {
     }
     for contract in [
         "exactly one path matches both",
+        "revision-*/interaction.md",
         "fixed leading metadata block through `- Action:`",
         "current Core state + ObjectiveSpec + Map + StructuralContext",
         "> project facts reverified now",
