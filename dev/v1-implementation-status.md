@@ -10,8 +10,8 @@ or test detail.
 |---|---|---|
 | v0.5 archive and active-path cleanup | Complete | Tag `v0.5.0` retains the old source; active plugin paths contain no Python runtime, CSV ledger, Review MCP, launcher, fallback, or compatibility engine |
 | Phase 1: binary and domain Core | Complete | `runtime/src/domain/`, `phase1_contract.rs`, generated state-machine coverage, and `I1..I19` audit checks |
-| Phase 2: store, artifacts, API | Complete | SQLite/artifact process-loss tests, Core service tests, MCP protocol tests, report/CLI contracts, and recovery/audit checks |
-| Phase 3: independent Subagent skill | Implemented; deterministic contracts green | `mobius-subagent`, its thirteen-condition contract tests, and the historical native-host evidence below |
+| Phase 2: store, artifacts, API | Complete | Append-only SQLite Trail, rebuildable projections, four-tool write MCP, read-only audit CLI, artifact process-loss tests, reports, and recovery checks |
+| Phase 3: independent Subagent skill | Implemented; deterministic contracts green | `mobius-subagent`, its fourteen-condition contract tests, and the historical native-host evidence below |
 | Phase 4: Composition and release | Implemented; deterministic local gates green | Copilot/Loop ownership contracts, public MCP accept/retry/replace/wait/remap/revise/abandon coverage, direct and delegated loops, Hook tests, and bundle gates |
 
 These statuses describe implementation and deterministic local evidence. They do not publish a
@@ -22,6 +22,8 @@ and independent review gates.
 
 - One Rust package exposes one executable target named `mobius`.
 - Trail is the only business fact source; projections and reports are derived and rebuildable.
+- Ordinary Agent reads use one literal canonical SQLite 3.40.1+ safe/read-only/query-only command.
+  Skills select targeted projection fields or bounded Trail ranges; no Agent ORM or read MCP exists.
 - The application service is the only mutation owner; public business mutation uses stdio MCP.
 - `mobius-copilot` owns human-authorized activation, revision, abandonment, and Map installation for
   `Initial` or `SpecRevised` Mapping states. Fresh transitions and interrupted durable Mapping
@@ -41,11 +43,11 @@ and independent review gates.
 
 - `plugins/mobius/runtime/src/domain/`: typed objects, guards, reducer, replay, and invariants.
 - `plugins/mobius/runtime/src/application/`: project admission, commands, Core service, stale-head
-  checks, Packet materialization, and next actions.
+  checks, Packet materialization, audit, and internal presentation/Stop reads.
 - `plugins/mobius/runtime/src/infrastructure/`: one project-bound SQLite database family, durable
   artifacts, crash recovery, projection rebuild, and integrity checks.
 - `plugins/mobius/runtime/src/presentation/`: context-dark, pinned, replaceable human reports.
-- `plugins/mobius/runtime/src/transport/`: stdio MCP, read/audit/doctor/report CLI, and lifecycle
+- `plugins/mobius/runtime/src/transport/`: four-tool stdio MCP, audit/doctor/report CLI, and lifecycle
   Hooks over the same service and executable.
 
 ### Composition and Subagent
@@ -102,6 +104,10 @@ unauthorized, cleanup-pending, missing-boundary, and missing-provenance matrix r
 invalid candidate before Core submission, then the valid candidate reached `Achieved` and a healthy
 audit. Native task/result/identity material was not persisted in the repository.
 
+The Context-optimization work after v1.0.0 changes the Subagent Skill, its contract test, the Agent
+read protocol, and MCP output. The hashes and installed-host run in this section are therefore
+historical release evidence, not evidence for the current working tree.
+
 ### Packaging and Release
 
 - `.github/workflows/ci.yml`: pinned source and target jobs.
@@ -111,7 +117,7 @@ audit. Native task/result/identity material was not persisted in the repository.
 - `docs/release-checklist.md`: real Codex loader and native-host gates required for each exact
   release candidate.
 
-## Verification Snapshot
+## Historical v1.0.0 Verification Snapshot
 
 The 2026-07-16 invocation-policy and host-boundary candidate passed:
 
@@ -126,14 +132,43 @@ The 2026-07-16 invocation-policy and host-boundary candidate passed:
 This snapshot is implementation evidence, not publication approval. Release still requires the
 exact-candidate independent review and explicit release decision below.
 
+## Current Working-Tree Context Snapshot
+
+The current candidate deletes the public read service, CLI read mode, MCP read and artifact-read
+tools, cursor/chunk DTOs, ORM-only infrastructure, and their compatibility tests. MCP now exposes
+exactly project initialization, artifact capture, typed transition, and maintenance-bound audit.
+Protocol E2Es observe state through read-only SQLite; Hook coverage admits only the exact supported
+CLI shape and proves two-stage SQLite/shell quoting on pathological identities. Composition Skills
+define targeted ordinary reads, progressively disclosed recursive Review closure, count/byte-
+admitted single-snapshot Wait enumeration, and head rechecks. Tracked fixtures execute a convergent
+multi-level Review DAG and the exact Wait reference SQL, including denial and truncation.
+
+The current candidate passes format, locked all-target check, Clippy with warnings denied, and all
+165 Rust tests. All three Skill validators, plugin validation, the source contract, final assembled
+bundle gate, and isolated real Codex `0.144.5` install gate pass. The installed direct and delegated
+loops use four-tool MCP writes, canonical read-only SQLite observations from an ordinary external
+cwd, exact Core-owned review material, `Achieved`, and healthy CLI audit.
+
+A checksum-verified official SQLite 3.53.3 source build supplies the ignored local prototype CLI.
+The exact safe/read-only/query-only command rejects DDL and `writefile()`. The formal Wait query
+returns one admitted zero-match summary; on 1,000 matching Evidence rows it reports count/bytes and
+returns only a 120-byte summary when the declared budget fails. The first independent
+exact-candidate review found quoting, transitive Review, and tracked-Wait gate blockers; this tree
+contains their focused remediations. A later stateless review returned no objections and identified
+only unreachable audit cursor metadata; final6 deletes that metadata. The final stateless Level-1
+review of final6 reports no objections, blockers, required revisions, or minor comments. Current
+native-Subagent evidence remains separate before any release-readiness claim.
+
 ## Supported v1 Boundary
 
 - Runtime target: `x86_64-unknown-linux-gnu`.
 - Rust toolchain: pinned `1.85.0`.
-- Minimum eligible native host: stable Codex CLI `>=0.143.0` on Linux x86-64.
+- Minimum eligible native host: stable Codex CLI `>=0.143.0` and canonical SQLite CLI `>=3.40.1`
+  on Linux x86-64.
 - Most recently verified installed-plugin host: Codex CLI `0.144.5`; every actual release host must
   rerun the complete installed-plugin gate.
 - Installed executable: `plugins/mobius/bin/mobius` only.
+- Agent read prerequisite: external canonical absolute SQLite CLI `>=3.40.1`; it is not bundled.
 - Source marketplace: `NOT_AVAILABLE`; only an assembled, gated copy becomes `AVAILABLE`.
 - Core workflow: local-only, with no hosted service, telemetry, daemon, downloader, or network
   requirement.
@@ -144,11 +179,25 @@ exact-candidate independent review and explicit release decision below.
   literal-command grammar is owned by `dev/Mobius-implement.md` and exhaustive Rust tests.
 - Mutation admission replays history before commit. v1 accepts this history-proportional
   cost instead of adding a cache or second truth source.
+- Ordinary Agent reads trust the transactionally maintained typed projection inside Mobius's
+  cooperative private-database boundary; explicit audit/rebuild proves Trail equivalence. A hostile
+  local database writer would require a separately designed immutable state-hash chain and schema
+  migration.
+- Direct SQL has no server-enforced row or byte cap. Skills bound ordinary queries, while formal
+  Wait emits the complete matching Evidence set only when count/bytes fit the declared Context
+  budget; otherwise it returns summary-only and fails closed.
+- Artifact capture still carries the complete bytes in one MCP request. Skills permit it only when
+  the atomic payload fits the current MCP and Context budget; an oversized required blob blocks
+  instead of introducing chunking, path ingestion, or a second mutation path.
+- A bounded maintenance audit can report `complete=false`; the supported response exposes totals,
+  not a dead continuation token. Remediate the reported integrity class and rerun audit.
+- The Hook verifies literal executable path and version per call but cannot remove the same-user
+  Hook-to-exec replacement race; this remains a cooperative boundary.
 - The installed delegated lane consumes one already validated observation; full native-result
   validation and failure matrices stay in Rust/native-host gates rather than production protocol.
 - Real Codex installation, native Subagent lifecycle behavior, a new host, changed experimental
   metadata, or a new target requires fresh evidence. Checked-in CI artifacts are not publishable
-  without those gates and an exact-candidate independent review.
+  without the applicable gates and an explicit release decision.
 
-There are no open Phase 2–4 implementation ownership decisions. Exact-candidate native-host review
-and publication remain separate, explicit release decisions.
+There are no open Phase 2–4 ownership decisions. Release-host matrix coverage, current
+native-Subagent verification, explicit release decision, and publication remain separate gates.

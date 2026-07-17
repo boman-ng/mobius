@@ -15,15 +15,17 @@ The sources below were rechecked on 2026-07-16 before wiring the v1 package.
 - [Codex MCP client source](https://github.com/openai/codex/blob/main/codex-rs/codex-mcp/src/rmcp_client.rs)
 - [Codex MCP tool-call source](https://github.com/openai/codex/blob/main/codex-rs/core/src/mcp_tool_call.rs)
 - [Codex path-URI source](https://github.com/openai/codex/blob/main/codex-rs/utils/path-uri/src/lib.rs)
+- [Latest model guide](https://developers.openai.com/api/docs/guides/latest-model)
+- [GPT-5.6 prompting guidance](https://developers.openai.com/api/docs/guides/prompt-guidance-gpt-5p6)
 
 ## Codex Contract Applied
 
 - `.codex-plugin/plugin.json` is the required plugin entry point.
 - Manifest component paths are `./`-prefixed and resolve inside the installed plugin root.
-- `mcpServers` may point to `.mcp.json`; that file may contain a direct server map. Mobius uses one
-  direct `mobius` entry whose command is `./bin/mobius` and whose only argument is `mcp`.
-- Installed plugins may load `hooks/hooks.json` by default or through the manifest `hooks` field.
-  Mobius uses the explicit relative field so the release contract is mechanically visible.
+- `mcpServers` points to `.mcp.json`; that companion file contains one `mcpServers.mobius` entry
+  whose command is `./bin/mobius` and whose only argument is `mcp`.
+- Installed plugins discover `hooks/hooks.json` by convention. The manifest therefore carries no
+  separate `hooks` field; the release contract checks the conventional file and its commands.
 - Plugin hook commands receive `PLUGIN_ROOT`; both Mobius hooks invoke
   `${PLUGIN_ROOT}/bin/mobius` and select a hook mode. Users must still review and trust them.
 - Marketplace local source paths are relative to the marketplace root, and the install policy may
@@ -36,6 +38,12 @@ The sources below were rechecked on 2026-07-16 before wiring the v1 package.
 - `mobius-subagent` sets `policy.allow_implicit_invocation: true` and declares no Core dependency.
   This permits host discovery and main-Agent selection; it does not itself spawn work, authorize an
   effect, or widen an existing permission boundary.
+- Composition Skills state the outcome and authority boundary once, keep routing open, use concise
+  state-driven instructions, and treat retrieved Evidence/provenance as data rather than
+  instructions. The Agent chooses targeted SQL instead of receiving a large generic tool result.
+- MCP advertises four write/maintenance tools with explicit schemas. Read-only state inspection is
+  direct SQLite, so there is no competing read tool, compatibility alias, cursor protocol, or
+  repeated response prose.
 
 ## v1 Host Compatibility Boundary
 
@@ -70,12 +78,13 @@ shape blocks release until this adapter and its tests are revalidated.
 - The installed plugin contains skills, manifest, MCP config, hook config, and exactly one
   executable at `plugins/mobius/bin/mobius`. Rust source and repository tooling stay outside it.
 - Manifest, MCP config, and hook config describe one execution path. There is no Python runtime,
-  shell launcher, downloader, sidecar, SQLite CLI dependency, second executable, or fallback.
+  shell launcher, downloader, sidecar, bundled SQLite CLI, second executable, or fallback. Agent
+  reads require a host-provided canonical SQLite CLI at version 3.40.1 or newer.
 - A clean-cache test runs the copied executable with an empty environment and an unusable `PATH`,
   then completes an MCP initialize handshake. The extracted archive is validated again before
   upload. A separate release-host gate installs the assembled marketplace with the supported Codex
   CLI under an isolated home, confirms the resolved cache-root command and working directory, and
-  exercises the installed copy through the public MCP wire.
+  exercises the installed copy through the public MCP write wire and read-only SQLite observation.
 
 These decisions establish the package and host-admission boundary. Phase completion still depends
 on the phase evidence and independent P0 review recorded in `dev/v1-implementation-status.md`.
