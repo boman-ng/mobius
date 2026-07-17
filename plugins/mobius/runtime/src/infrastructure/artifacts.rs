@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
@@ -252,6 +252,7 @@ impl ArtifactStore {
     }
 
     /// Reads a snapshot only after recomputing both its digest and size.
+    #[cfg(test)]
     pub(crate) fn read(&self, snapshot: &CoreSnapshot) -> Result<Vec<u8>, ArtifactError> {
         self.validate_layout()?;
         let path = self.blob_path(&snapshot.digest)?;
@@ -271,7 +272,11 @@ impl ArtifactStore {
 
     /// Recomputes the stored bytes; filename presence alone is never an integrity result.
     pub(crate) fn verify(&self, snapshot: &CoreSnapshot) -> Result<(), ArtifactError> {
-        self.read(snapshot).map(|_| ())
+        self.validate_layout()?;
+        let path = self.blob_path(&snapshot.digest)?;
+        safe_regular_file_metadata(&path, &snapshot.digest)?;
+        let mut file = File::open(&path).map_err(|source| io_error("open blob", &path, source))?;
+        verify_open_file(snapshot, &mut file, &path)
     }
 
     /// Deletes only blobs absent from the supplied Trail-derived reachable set, plus known
@@ -445,6 +450,7 @@ fn lower_hex(bytes: &[u8]) -> String {
     result
 }
 
+#[cfg(test)]
 fn verify_bytes(snapshot: &CoreSnapshot, bytes: &[u8]) -> Result<(), ArtifactError> {
     if snapshot.digest.canonical_sha256_hex().is_none() {
         return Err(ArtifactError::InvalidDigest(snapshot.digest.0.clone()));
@@ -455,6 +461,47 @@ fn verify_bytes(snapshot: &CoreSnapshot, bytes: &[u8]) -> Result<(), ArtifactErr
         lower_hex(&Sha256::digest(bytes))
     );
     let actual_size = bytes.len() as u64;
+    if actual_size != snapshot.size_bytes || actual_digest != snapshot.digest.0 {
+        return Err(ArtifactError::IntegrityMismatch {
+            digest: snapshot.digest.clone(),
+            expected_size: snapshot.size_bytes,
+            actual_size,
+            actual_digest,
+        });
+    }
+    Ok(())
+}
+
+fn verify_open_file(
+    snapshot: &CoreSnapshot,
+    file: &mut File,
+    path: &Path,
+) -> Result<(), ArtifactError> {
+    if snapshot.digest.canonical_sha256_hex().is_none() {
+        return Err(ArtifactError::InvalidDigest(snapshot.digest.0.clone()));
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|source| io_error("seek blob", path, source))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut actual_size = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| io_error("verify blob", path, source))?;
+        if read == 0 {
+            break;
+        }
+        actual_size = actual_size
+            .checked_add(read as u64)
+            .ok_or_else(|| ArtifactError::InvalidProjectRoot("artifact size overflow".into()))?;
+        hasher.update(&buffer[..read]);
+    }
+    let actual_digest = format!(
+        "{}{}",
+        ContentDigest::SHA256_PREFIX,
+        lower_hex(&hasher.finalize())
+    );
     if actual_size != snapshot.size_bytes || actual_digest != snapshot.digest.0 {
         return Err(ArtifactError::IntegrityMismatch {
             digest: snapshot.digest.clone(),

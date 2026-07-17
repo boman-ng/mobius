@@ -1,13 +1,11 @@
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use serde::Serialize;
 use serde_json::json;
 
-use crate::application::service::{
-    AuditRequest, CoreService, ProjectBinding, ReadQuery, ReadRequest, ServiceError,
-};
+use crate::application::service::{AuditRequest, CoreService, ProjectBinding, ServiceError};
 use crate::domain::{ObjectiveId, ProjectId};
 use crate::error::MobiusError;
 use crate::presentation::report::{CurrentReportState, ReportRenderer, ReportScope};
@@ -21,39 +19,11 @@ pub(crate) fn run(mode: &str, arguments: &[OsString]) -> Result<(), MobiusError>
     })?;
     let service = CoreService::new(vec![project_root.clone()]);
     match mode {
-        "read" => run_read(&service, &project_root, arguments),
         "audit" => run_audit(&service, &project_root, arguments),
         "doctor" => run_doctor(&service, project_root, arguments),
         "report" => run_report(&service, &project_root, arguments),
         _ => Err(MobiusError::invalid_invocation("unknown CLI adapter")),
     }
-}
-
-fn run_read(
-    service: &CoreService,
-    project_root: &std::path::Path,
-    arguments: &[OsString],
-) -> Result<(), MobiusError> {
-    if !(1..=2).contains(&arguments.len()) {
-        return Err(MobiusError::invalid_invocation(
-            "usage: mobius read <project-id> [<query-json>|-]",
-        ));
-    }
-    let project_id = ProjectId::new(argument(arguments, 0, "project id")?);
-    let query_text = match arguments.get(1).and_then(|value| value.to_str()) {
-        Some("-") | None => read_stdin()?,
-        Some(value) => value.to_owned(),
-    };
-    let query = serde_json::from_str::<ReadQuery>(&query_text).map_err(|error| {
-        MobiusError::invalid_invocation(format!("invalid typed read query JSON: {error}"))
-    })?;
-    let response = service
-        .read(ReadRequest {
-            binding: binding(project_root, project_id),
-            query,
-        })
-        .map_err(service_error)?;
-    write_json(&response)
 }
 
 fn run_audit(
@@ -73,6 +43,7 @@ fn run_audit(
                 ProjectId::new(argument(arguments, 0, "project id")?),
             ),
             maintenance: None,
+            limit: None,
         })
         .map_err(service_error)?;
     write_json(&response)
@@ -153,14 +124,6 @@ fn argument(
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| MobiusError::invalid_invocation(format!("{name} must be non-empty UTF-8")))
-}
-
-fn read_stdin() -> Result<String, MobiusError> {
-    let mut input = String::new();
-    io::stdin()
-        .read_to_string(&mut input)
-        .map_err(|error| MobiusError::operation("input_failed", error.to_string()))?;
-    Ok(input)
 }
 
 fn write_json(value: &impl Serialize) -> Result<(), MobiusError> {

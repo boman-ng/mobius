@@ -46,7 +46,7 @@ fn runtime_modes_are_explicit_and_closed_over_the_supported_surface() {
         .expect("mobius help must start");
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).expect("help must be UTF-8");
-    for mode in ["mcp", "read", "audit", "doctor", "report", "hook"] {
+    for mode in ["mcp", "audit", "doctor", "report", "hook"] {
         assert!(help.contains(mode), "help omitted {mode}");
     }
 
@@ -57,12 +57,12 @@ fn runtime_modes_are_explicit_and_closed_over_the_supported_surface() {
     assert!(mcp.status.success());
     assert!(mcp.stdout.is_empty());
 
-    let missing_read_input = Command::new(binary)
+    let removed_read_mode = Command::new(binary)
         .arg("read")
         .output()
-        .expect("read mode must start");
-    assert_eq!(missing_read_input.status.code(), Some(2));
-    let error = String::from_utf8(missing_read_input.stderr).expect("error must be UTF-8");
+        .expect("removed read mode must fail cleanly");
+    assert_eq!(removed_read_mode.status.code(), Some(2));
+    let error = String::from_utf8(removed_read_mode.stderr).expect("error must be UTF-8");
     assert!(error.contains("\"code\":\"invalid_invocation\""));
 
     let unknown = Command::new(binary)

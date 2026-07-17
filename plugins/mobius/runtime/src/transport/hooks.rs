@@ -2,14 +2,13 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::application::admission::admit_project_root;
-use crate::application::service::{
-    CoreService, ProjectBinding as ServiceProjectBinding, ReadQuery, ReadRequest, ReadResult,
-};
+use crate::application::service::{CoreService, ProjectBinding as ServiceProjectBinding};
 use crate::domain::{ObjectiveId, ObjectiveState};
 use crate::error::MobiusError;
 use crate::infrastructure::sqlite::SqliteStore;
@@ -583,6 +582,8 @@ fn shell_segment_destroys_core_descendants_from_unknown(
 }
 
 struct LiteralShellCommand {
+    executable: String,
+    direct_exec: bool,
     operation: String,
     arguments: Vec<ShellWord>,
     cwd_overrides: Vec<String>,
@@ -613,6 +614,90 @@ impl ShellWord {
 
 fn static_arguments(arguments: &[ShellWord]) -> Option<Vec<&str>> {
     arguments.iter().map(ShellWord::static_value).collect()
+}
+
+fn supported_sqlite_read(command: &LiteralShellCommand, project_root: &Path) -> bool {
+    if command.operation != "sqlite3" || !command.direct_exec || !command.cwd_overrides.is_empty() {
+        return false;
+    }
+    let Some(arguments) = static_arguments(&command.arguments) else {
+        return false;
+    };
+    let [
+        "--safe",
+        "--readonly",
+        "--batch",
+        "--bail",
+        "--init",
+        "/dev/null",
+        "--line",
+        database,
+        sql,
+    ] = arguments.as_slice()
+    else {
+        return false;
+    };
+    if sql.is_empty() {
+        return false;
+    }
+
+    let executable = Path::new(&command.executable);
+    if !executable.is_absolute()
+        || executable.file_name().and_then(|name| name.to_str()) != Some("sqlite3")
+        || fs::canonicalize(executable).ok().as_deref() != Some(executable)
+    {
+        return false;
+    }
+    let database = Path::new(database);
+    let expected_database = project_root.join(".mobius/mobius.sqlite3");
+    if !database.is_absolute()
+        || fs::canonicalize(database).ok().as_deref() != Some(database)
+        || fs::canonicalize(expected_database).ok().as_deref() != Some(database)
+    {
+        return false;
+    }
+
+    supported_sqlite_version(executable)
+}
+
+fn supported_sqlite_read_for_known_binding(
+    command: &LiteralShellCommand,
+    effective_cwd: Option<&Path>,
+) -> bool {
+    let cwd_project = effective_cwd.and_then(find_bound_project_root);
+    let database_project = static_arguments(&command.arguments)
+        .and_then(|arguments| arguments.get(7).copied())
+        .and_then(|database| find_bound_project_root(Path::new(database)));
+    cwd_project
+        .into_iter()
+        .chain(database_project)
+        .any(|project_root| supported_sqlite_read(command, &project_root))
+}
+
+fn supported_sqlite_version(executable: &Path) -> bool {
+    let Ok(output) = Command::new(executable).arg("--version").output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(stdout) = std::str::from_utf8(&output.stdout) else {
+        return false;
+    };
+    let Some(version) = stdout.split_whitespace().next() else {
+        return false;
+    };
+    let parts = version
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(parts) = parts else {
+        return false;
+    };
+    let [major, minor, patch, ..] = parts.as_slice() else {
+        return false;
+    };
+    (*major, *minor, *patch) >= (3, 40, 1)
 }
 
 fn literal_shell_command(segment: &str) -> LiteralShellCommandParse {
@@ -653,6 +738,8 @@ fn literal_shell_command(segment: &str) -> LiteralShellCommandParse {
         .any(|word| word.starts_with("GIT_ICASE_PATHSPECS="));
     let arguments = words[location.index + 1..].to_vec();
     LiteralShellCommandParse::Exec(LiteralShellCommand {
+        executable: operation_word.to_owned(),
+        direct_exec: location.index == 0,
         operation,
         arguments,
         cwd_overrides: location.cwd_overrides,
@@ -2048,11 +2135,23 @@ fn shell_segment_mutation_targets(segment: &str, workdir: Option<&Path>) -> Vec<
     };
     let effective_cwd = apply_filesystem_cwd_overrides(workdir, &command.cwd_overrides);
     if let Some(payload) = static_shell_wrapper_payload(&command) {
+        if payload.command.to_ascii_lowercase().contains("sqlite3") {
+            targets.extend(conservative_shell_targets(
+                segment,
+                effective_cwd.as_deref(),
+            ));
+            return targets;
+        }
         let wrapper_cwd = apply_filesystem_cwd_overrides(workdir, &payload.cwd_overrides);
         targets.extend(shell_command_mutation_targets(
             &payload.command,
             wrapper_cwd.as_deref(),
         ));
+        return targets;
+    }
+    if command.operation == "sqlite3"
+        && supported_sqlite_read_for_known_binding(&command, effective_cwd.as_deref())
+    {
         return targets;
     }
     if shell_command_is_read_only(&command.operation) {
@@ -2106,6 +2205,12 @@ fn shell_segment_may_mutate_core_from_unknown(segment: &str, project_root: &Path
         LiteralShellCommandParse::NoExec => return false,
         LiteralShellCommandParse::Opaque => return true,
     };
+    if command.operation == "sqlite3" && supported_sqlite_read(&command, project_root) {
+        return false;
+    }
+    if command.operation == "sqlite3" {
+        return true;
+    }
     if static_shell_wrapper_payload(&command).is_some()
         || shell_command_is_read_only(&command.operation)
     {
@@ -3601,23 +3706,15 @@ fn objective_is_achieved(cwd: &Path, objective_id: &ObjectiveId) -> Result<bool,
         .map_err(|error| format!("project binding inspection failed: {error}"))?;
     let canonical_root = admitted.canonical_root().to_path_buf();
     let service = CoreService::new(vec![canonical_root.clone()]);
-    let response = service
-        .read(ReadRequest {
-            binding: ServiceProjectBinding {
-                project_root: canonical_root,
-                project_id: storage_binding.project_id,
-            },
-            query: ReadQuery::Status {
-                objective_id: Some(objective_id.clone()),
-            },
-        })
-        .map_err(|error| error.to_string())?;
-
-    let ReadResult::Status(status) = response.result else {
-        return Err("Core returned a non-status response".to_owned());
+    let binding = ServiceProjectBinding {
+        project_root: canonical_root,
+        project_id: storage_binding.project_id,
     };
+    let state = service
+        .objective_state(&binding, objective_id)
+        .map_err(|error| error.to_string())?;
     Ok(matches!(
-        status.objective_state,
+        state,
         Some(ObjectiveState::Achieved { ref objective, .. }) if objective == objective_id
     ))
 }
@@ -3742,6 +3839,144 @@ mod tests {
     fn pre_tool_use_output_bound(input: &PreToolUseInput, project_root: &str) -> Option<Value> {
         let targets = mutation_targets(input);
         pre_tool_use_decision(input, &targets, &[PathBuf::from(project_root)])
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_read_exception_requires_one_exact_safe_read_shape() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root =
+            std::env::temp_dir().join(format!("mobius-hook-sqlite-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".mobius")).unwrap();
+        let database = root.join(".mobius/mobius.sqlite3");
+        fs::write(&database, b"binding marker").unwrap();
+        let captured_sql = root.join("captured-sql");
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let sqlite = bin.join("sqlite3");
+        fs::write(
+            &sqlite,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$#\" -eq 1 ] && [ \"$1\" = --version ]; then\n\
+                   printf '3.40.1 test-build\\n'\n\
+                   exit 0\n\
+                 fi\n\
+                 [ \"$#\" -eq 9 ] || exit 64\n\
+                 printf '%s' \"$9\" > '{}'\n",
+                captured_sql.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&sqlite, fs::Permissions::from_mode(0o755)).unwrap();
+        let root = root.canonicalize().unwrap();
+        let sqlite = sqlite.canonicalize().unwrap();
+        let database = database.canonicalize().unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "mobius-hook-sqlite-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&outside).unwrap();
+        let sql =
+            "PRAGMA query_only=ON; BEGIN; SELECT project_seq FROM schema_meta LIMIT 1; COMMIT;";
+        let exact = format!(
+            "{} --safe --readonly --batch --bail --init /dev/null --line {} '{}'",
+            sqlite.display(),
+            database.display(),
+            sql
+        );
+
+        assert_eq!(
+            pre_tool_use_output(&tool_input_at(
+                "exec_command",
+                json!({"cmd": exact}),
+                root.to_str().unwrap(),
+            )),
+            None
+        );
+        assert_eq!(
+            pre_tool_use_output(&tool_input_at(
+                "exec_command",
+                json!({"cmd": exact}),
+                outside.to_str().unwrap(),
+            )),
+            None
+        );
+
+        let identity = "typed O'Brien \"double\" \\ slash\nwhite space\t$HOME $(touch mobius-sql-injected) \
+                        `touch mobius-sql-injected`; touch mobius-sql-injected; \
+                        & | < > ( ) * ? [ ] { }";
+        let sqlite_identity = format!("'{}'", identity.replace('\'', "''"));
+        let sqlite_round_trip = rusqlite::Connection::open_in_memory()
+            .unwrap()
+            .query_row(&format!("SELECT {sqlite_identity}"), [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        assert_eq!(sqlite_round_trip, identity);
+        let complete_sql =
+            format!("PRAGMA query_only=ON; BEGIN; SELECT {sqlite_identity} AS identity; COMMIT;");
+        let shell_word = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+        let quoted = format!(
+            "{} --safe --readonly --batch --bail --init /dev/null --line {} {}",
+            shell_word(sqlite.to_str().unwrap()),
+            shell_word(database.to_str().unwrap()),
+            shell_word(&complete_sql),
+        );
+        assert_eq!(
+            pre_tool_use_output(&tool_input_at(
+                "exec_command",
+                json!({"cmd": quoted}),
+                outside.to_str().unwrap(),
+            )),
+            None
+        );
+        let status = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&quoted)
+            .current_dir(&outside)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(fs::read_to_string(&captured_sql).unwrap(), complete_sql);
+        assert!(!outside.join("mobius-sql-injected").exists());
+
+        for rejected in [
+            format!(
+                "{} --readonly --batch --bail --init /dev/null --line {} '{}'",
+                sqlite.display(),
+                database.display(),
+                sql
+            ),
+            format!(
+                "sqlite3 --safe --readonly --batch --bail --init /dev/null --line {} '{}'",
+                database.display(),
+                sql
+            ),
+            format!("{exact} > {}-wal", database.display()),
+        ] {
+            assert!(
+                pre_tool_use_output(&tool_input_at(
+                    "exec_command",
+                    json!({"cmd": rejected}),
+                    root.to_str().unwrap(),
+                ))
+                .is_some()
+            );
+        }
+
+        fs::write(&sqlite, b"#!/bin/sh\nprintf '3.40.0 old-build\\n'\n").unwrap();
+        assert!(
+            pre_tool_use_output(&tool_input_at(
+                "exec_command",
+                json!({"cmd": exact}),
+                root.to_str().unwrap(),
+            ))
+            .is_some()
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir(outside);
     }
 
     fn stop_input(message: &str) -> StopInput {

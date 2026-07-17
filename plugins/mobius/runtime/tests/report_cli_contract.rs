@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -270,15 +271,18 @@ fn generation_path(publication: &Value) -> PathBuf {
     )
 }
 
-fn read_status(project: &TestProject, project_id: &str, objective_id: &str) -> Vec<u8> {
-    let query = json!({"kind": "status", "objective_id": objective_id}).to_string();
-    let output = run_cli(&project.root, &["read", project_id, &query]);
-    assert!(
-        output.status.success(),
-        "read failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
+fn read_projection(project: &TestProject, objective_id: &str) -> Vec<u8> {
+    Connection::open_with_flags(
+        project.root.join(".mobius/mobius.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open Mobius database read-only")
+    .query_row(
+        "SELECT projection_bytes FROM objective_projection WHERE objective_id = ?1",
+        [objective_id],
+        |row| row.get(0),
+    )
+    .expect("read Objective projection")
 }
 
 #[test]
@@ -379,7 +383,7 @@ fn real_trail_reports_are_complete_deterministic_isolated_and_read_only_on_failu
     fs::write(&invalid_session, b"not a directory").expect("create invalid session entry");
     let database = project.root.join(".mobius/mobius.sqlite3");
     let database_before = fs::read(&database).expect("database before failed report");
-    let status_before = read_status(&project, &project_id, objective_b);
+    let status_before = read_projection(&project, objective_b);
     let failed = run_cli(
         &project.root,
         &[
@@ -400,7 +404,7 @@ fn real_trail_reports_are_complete_deterministic_isolated_and_read_only_on_failu
         "report failure mutated SQLite bytes"
     );
     assert_eq!(
-        read_status(&project, &project_id, objective_b),
+        read_projection(&project, objective_b),
         status_before,
         "report failure changed the Core read model"
     );
