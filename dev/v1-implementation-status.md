@@ -1,6 +1,6 @@
 # Mobius v1 Implementation Status
 
-Updated: 2026-07-16. The three `dev/` blueprints are authoritative. This file records phase status,
+Updated: 2026-07-17. The three `dev/` blueprints are authoritative. This file records phase status,
 evidence locations, the supported v1 boundary, and residual risks without duplicating blueprint
 or test detail.
 

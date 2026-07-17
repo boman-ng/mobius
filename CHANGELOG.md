@@ -2,7 +2,7 @@
 
 All notable changes to Mobius are documented here.
 
-## Unreleased
+## 1.1.1 - 2026-07-17
 
 - Make the project SQLite store explicit as an append-only Trail with rebuildable projections and
   document its stable five-table Agent read contract.
