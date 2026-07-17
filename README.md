@@ -4,7 +4,7 @@ Mobius v1 is a local-only, strictly serial, auditable route-finding system drive
 An Objective advances through Stage, Route, Attempt, Evidence, and Review until every current Stage
 has an accepted proof, or a human abandons the Objective.
 
-Mobius v1.1.1 is the current stable single-binary release. The checked-in marketplace deliberately
+Mobius v1.2.0 is the current stable single-binary release. The checked-in marketplace deliberately
 marks the source plugin `NOT_AVAILABLE` because source does not contain a release binary and has no
 install-time build or download path. The GitHub release publishes the gated Linux x86-64 assembled
 marketplace and its checksum.
@@ -52,27 +52,28 @@ the implementation boundary; `docs/release-checklist.md`, CI, and each GitHub re
 verification and supported-host boundary.
 
 `mobius-copilot` exclusively manages human-authorized Objective activation, revision,
-abandonment, and the initial or specification-revision Map those actions require. It resumes an
-interrupted durable Mapping state through that same installation path. `mobius-loop` executes an
-already active Objective, including operational remap and wait-drift Map installation; it hands
-contract changes back to Copilot instead of creating a second owner. Host policy requires users to
-invoke both Composition skills explicitly. The independent `mobius-subagent` remains discoverable
-so the main Agent may select bounded delegation while running an explicit Loop; discovery never
-expands the task's permission or effect boundaries.
+abandonment, and the initial or specification-revision Map those actions require. It clarifies the
+human intent as an expert and may preserve one advisory `interaction.md`, while the Loop main Agent
+designs every Route. Copilot resumes an interrupted durable Mapping state through the same
+installation path. `mobius-loop` executes an already active Objective, including operational remap
+and wait-drift Map installation; it hands contract changes back to Copilot instead of creating a
+second owner. Host policy requires users to invoke both Composition skills explicitly. The
+independent `mobius-subagent` remains discoverable so the main Agent may select bounded delegation
+while running an explicit Loop; discovery never expands the task's permission or effect boundaries.
 
 The v0.5 Python/CSV implementation is no longer present in the active plugin tree. Its durable
 source remains tag `v0.5.0`; a checksummed local inspection copy is stored under `.tmp/`, which is
 intentionally ignored and is not a release or compatibility path.
 
-## Install v1.1.1
+## Install v1.2.0
 
 Download both release assets, verify the checksum, extract the marketplace, then install it through
 Codex:
 
 ```bash
-sha256sum --check mobius-1.1.1-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf mobius-1.1.1-x86_64-unknown-linux-gnu.tar.gz
-codex plugin marketplace add ./mobius-1.1.1-x86_64-unknown-linux-gnu
+sha256sum --check mobius-1.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf mobius-1.2.0-x86_64-unknown-linux-gnu.tar.gz
+codex plugin marketplace add ./mobius-1.2.0-x86_64-unknown-linux-gnu
 codex plugin add mobius@mobius
 ```
 

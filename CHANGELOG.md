@@ -2,6 +2,21 @@
 
 All notable changes to Mobius are documented here.
 
+## 1.2.0 - 2026-07-17
+
+- Add expert-led, one-question-at-a-time Objective elicitation that challenges assumptions,
+  separates outcomes from implementation preferences, and asks the human to confirm the typed
+  Objective contract rather than design a Map or Route.
+- Make the Loop main Agent design every initial, added, and replacement Route. Initial and
+  specification-revision Maps now install with no predesigned Routes.
+- Preserve the accepted understanding as one simple, deletable `interaction.md` per
+  session/Objective. The summary stays outside Core hashes and Trail, is written only after an
+  accepted current transition, and is advisory input only while designing a Route.
+- Select external Subagent Judges only from qualifying Runtime-advertised profiles, keep provider
+  configuration Runtime-owned, and report unavailable or degraded profiles without substitution.
+- Remove obsolete v1 status and typed-mapping snapshots; the three blueprints, executable gates,
+  and release evidence remain the active sources of truth.
+
 ## 1.1.1 - 2026-07-17
 
 - Make the project SQLite store explicit as an append-only Trail with rebuildable projections and
