@@ -108,6 +108,25 @@ The Context-optimization work after v1.0.0 changes the Subagent Skill, its contr
 read protocol, and MCP output. The hashes and installed-host run in this section are therefore
 historical release evidence, not evidence for the current working tree.
 
+### v1.1.1 Exact-Candidate Native-Host Evidence
+
+The Codex `0.144.5` native workflow was exercised on 2026-07-17 against source commit
+`e4aee509d04ee2540157cee074da4e6d53c49cc5` and these current contract bytes:
+
+- `mobius-subagent/SKILL.md`:
+  `dd1df7f05f46b19bc83ea948a2a4143aafb54c79798a5cd1dedbb50a4b5b2bb1`;
+- `references/role-profiles.md`:
+  `c4ce21b73ab01b87d10f1da874fe01d0187932047f206264def932e9ad8b45d0`;
+- `subagent_skill_contract.rs`:
+  `79d4ae8b560fd370c12218babec0b2e87fa9ad4ff5798d285ac4e20af01db820`.
+
+One bounded read-only Verifier went through native wait and same-envelope follow-up, then was
+explicitly interrupted. A fresh bounded Verifier completed normally and independently confirmed
+that the assembled candidate manifest is `1.1.1` and its sole executable is
+`plugins/mobius/bin/mobius`. Its complete public result stayed within the declared byte budget,
+reported no effects or boundary violation, and was consumed only as advisory verification. No
+Runtime ledger, thread identity, task payload, or result payload was persisted.
+
 ### Packaging and Release
 
 - `.github/workflows/ci.yml`: pinned source and target jobs.
@@ -132,32 +151,31 @@ The 2026-07-16 invocation-policy and host-boundary candidate passed:
 This snapshot is implementation evidence, not publication approval. Release still requires the
 exact-candidate independent review and explicit release decision below.
 
-## Current Working-Tree Context Snapshot
+## v1.1.1 Candidate Snapshot
 
-The current candidate deletes the public read service, CLI read mode, MCP read and artifact-read
-tools, cursor/chunk DTOs, ORM-only infrastructure, and their compatibility tests. MCP now exposes
-exactly project initialization, artifact capture, typed transition, and maintenance-bound audit.
+The candidate deletes the public read service, CLI read mode, MCP read and artifact-read tools,
+Agent read/audit cursor and chunk DTOs, ORM-only infrastructure, and their compatibility tests. MCP
+now exposes exactly project initialization, artifact capture, typed transition, and
+maintenance-bound audit.
 Protocol E2Es observe state through read-only SQLite; Hook coverage admits only the exact supported
 CLI shape and proves two-stage SQLite/shell quoting on pathological identities. Composition Skills
 define targeted ordinary reads, progressively disclosed recursive Review closure, count/byte-
 admitted single-snapshot Wait enumeration, and head rechecks. Tracked fixtures execute a convergent
 multi-level Review DAG and the exact Wait reference SQL, including denial and truncation.
 
-The current candidate passes format, locked all-target check, Clippy with warnings denied, and all
+The candidate passes format, locked all-target check, Clippy with warnings denied, and all
 165 Rust tests. All three Skill validators, plugin validation, the source contract, final assembled
 bundle gate, and isolated real Codex `0.144.5` install gate pass. The installed direct and delegated
 loops use four-tool MCP writes, canonical read-only SQLite observations from an ordinary external
 cwd, exact Core-owned review material, `Achieved`, and healthy CLI audit.
 
-A checksum-verified official SQLite 3.53.3 source build supplies the ignored local prototype CLI.
+A checksum-verified official SQLite 3.53.3 source build supplies the ignored local release-gate CLI.
 The exact safe/read-only/query-only command rejects DDL and `writefile()`. The formal Wait query
 returns one admitted zero-match summary; on 1,000 matching Evidence rows it reports count/bytes and
-returns only a 120-byte summary when the declared budget fails. The first independent
-exact-candidate review found quoting, transitive Review, and tracked-Wait gate blockers; this tree
-contains their focused remediations. A later stateless review returned no objections and identified
-only unreachable audit cursor metadata; final6 deletes that metadata. The final stateless Level-1
-review of final6 reports no objections, blockers, required revisions, or minor comments. Current
-native-Subagent evidence remains separate before any release-readiness claim.
+returns only a 120-byte summary when the declared budget fails. Earlier independent reviews found
+quoting, transitive Review, tracked-Wait, and unreachable audit-cursor issues; this candidate
+contains their focused remediations. Publication still requires a fresh independent review of the
+final committed candidate and the explicit release decision.
 
 ## Supported v1 Boundary
 
