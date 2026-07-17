@@ -7,20 +7,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 
 use crate::application::admission::{AdmittedProjectRoot, admit_project_root};
 use crate::application::commands::ApplyTransitionRequest;
-use crate::application::commands::{MutationCommand, SealAttemptCommand, required_input_fields};
+use crate::application::commands::{MutationCommand, SealAttemptCommand};
 use crate::domain::{
-    AcceptanceContext, CarryVerdict, CoreSnapshot, DomainConfiguration, Evidence, EvidenceId,
-    FirstClassObject, FrozenObservation, HeadBinding, LifecycleProjection, NavState,
-    ObjectIdentity, ObjectiveId, ObjectiveSpecId, ObjectiveState, ProjectId, ReviewDecisionId,
-    ReviewPacket, ReviewPacketId, SealAttemptInput, StageId, TRAIL_EVENT_SCHEMA, TrailFact,
-    TransitionInput, TransitionKind, acceptance_context, audit_invariants, current_proofs,
-    decode_trail_fact, dependency_view, encode_canonical, encode_trail_fact, evidence_universe,
-    initial_configuration, reduce, replay,
+    CarryVerdict, CoreSnapshot, DomainConfiguration, Evidence, EvidenceId, FirstClassObject,
+    FrozenObservation, HeadBinding, LifecycleProjection, NavState, ObjectIdentity, ObjectiveId,
+    ObjectiveSpecId, ObjectiveState, ProjectId, ReviewDecisionId, ReviewPacket, ReviewPacketId,
+    SealAttemptInput, StageId, TRAIL_EVENT_SCHEMA, TrailFact, TransitionInput, TransitionKind,
+    audit_invariants, current_proofs, decode_trail_fact, dependency_view, encode_canonical,
+    encode_trail_fact, evidence_universe, initial_configuration, reduce, replay,
 };
 use crate::infrastructure::artifacts::{ArtifactError, ArtifactStore};
 use crate::infrastructure::sqlite::{
@@ -30,6 +29,8 @@ use crate::infrastructure::sqlite::{
 
 const OBJECTIVE_PROJECTION_SCHEMA: &str = "mobius.objective-projection.v1";
 const OBJECT_PROJECTION_SCHEMA: &str = "mobius.object-projection.v1";
+pub const DEFAULT_AUDIT_ISSUE_LIMIT: u32 = 20;
+pub const MAX_AUDIT_ISSUE_LIMIT: u32 = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,115 +53,9 @@ pub struct ProjectInitResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ReadQuery {
-    Status {
-        objective_id: Option<ObjectiveId>,
-    },
-    CurrentContext {
-        objective_id: ObjectiveId,
-    },
-    Object {
-        objective_id: ObjectiveId,
-        identity: ObjectIdentity,
-    },
-    Trail {
-        objective_id: ObjectiveId,
-    },
-    Proof {
-        objective_id: ObjectiveId,
-    },
-    ReviewMaterial {
-        objective_id: ObjectiveId,
-    },
-    NextActions {
-        objective_id: ObjectiveId,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReadRequest {
-    pub binding: ProjectBinding,
-    pub query: ReadQuery,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StatusView {
-    pub objective_ids: Vec<ObjectiveId>,
-    pub active_objective: Option<ObjectiveId>,
-    pub objective_state: Option<ObjectiveState>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CurrentContextView {
-    pub stage: StageId,
-    pub context: AcceptanceContext,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TrailEntry {
-    pub project_seq: u64,
-    pub objective_seq: u64,
-    pub event_digest: String,
-    pub fact: TrailFact,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewMaterialView {
-    pub packet: ReviewPacket,
-    pub dependency_view: BTreeSet<ReviewDecisionId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NextAction {
-    pub transition: TransitionKind,
-    pub required_input: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum ReadResult {
-    Status(StatusView),
-    CurrentContext(Option<CurrentContextView>),
-    Object(Option<FirstClassObject>),
-    Trail(Vec<TrailEntry>),
-    Proof(BTreeMap<StageId, ReviewDecisionId>),
-    ReviewMaterial(Option<ReviewMaterialView>),
-    NextActions(Vec<NextAction>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReadResponse {
-    pub heads: HeadBinding,
-    pub objective_id: Option<ObjectiveId>,
-    pub result: ReadResult,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureArtifactRequest {
     pub binding: ProjectBinding,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReadArtifactRequest {
-    pub binding: ProjectBinding,
-    pub snapshot: CoreSnapshot,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReadArtifactResponse {
-    pub snapshot: CoreSnapshot,
     pub bytes: Vec<u8>,
 }
 
@@ -198,6 +93,7 @@ pub struct MaintenanceRequest {
 pub struct AuditRequest {
     pub binding: ProjectBinding,
     pub maintenance: Option<MaintenanceRequest>,
+    pub limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,11 +113,20 @@ pub struct AuditIssue {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AuditIssuePage {
+    pub returned: u32,
+    pub total: u64,
+    pub complete: bool,
+    pub items: Vec<AuditIssue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditResponse {
     pub status: AuditStatus,
     pub project_seq: u64,
     pub checked_objectives: usize,
-    pub issues: Vec<AuditIssue>,
+    pub issues: AuditIssuePage,
     pub maintenance_applied: Option<MaintenanceAction>,
 }
 
@@ -329,108 +234,18 @@ impl CoreService {
         })
     }
 
-    pub fn read(&self, request: ReadRequest) -> Result<ReadResponse, ServiceError> {
-        validate_read_query(&request.query)?;
-        let (admitted, mut store) = self.open_bound(&request.binding)?;
+    pub(crate) fn objective_state(
+        &self,
+        binding: &ProjectBinding,
+        objective: &ObjectiveId,
+    ) -> Result<Option<ObjectiveState>, ServiceError> {
+        let (_admitted, mut store) = self.open_bound(binding)?;
         let transaction = store.begin_read().map_err(store_error)?;
-        read_validated_global_trail(&transaction)?;
-        let project_seq = transaction.project_head().map_err(store_error)?;
-
-        let (selected_objective, objective_ids, active_objective, configuration) =
-            match &request.query {
-                ReadQuery::Status { objective_id } => {
-                    let project = load_project_read(&transaction, None)?;
-                    let selected = objective_id.clone().or_else(|| project.active.clone());
-                    let configuration = selected
-                        .as_ref()
-                        .and_then(|id| project.objectives.get(id))
-                        .map(|value| value.configuration.clone());
-                    (
-                        selected,
-                        project.objectives.keys().cloned().collect(),
-                        project.active,
-                        configuration,
-                    )
-                }
-                query => {
-                    let selected = query_objective(query).clone();
-                    let replayed = load_replayed_read(&transaction, &selected)?;
-                    (
-                        Some(selected),
-                        Vec::new(),
-                        transaction.active_objective().map_err(store_error)?,
-                        Some(replayed.configuration),
-                    )
-                }
-            };
-
-        let objective_seq = match &selected_objective {
-            Some(objective) => {
-                transaction
-                    .heads(objective)
-                    .map_err(store_error)?
-                    .objective_seq
-            }
-            None => 0,
-        };
-        let heads = HeadBinding {
-            expected_project_seq: project_seq,
-            expected_objective_seq: objective_seq,
-        };
-        let result = match request.query {
-            ReadQuery::Status { .. } => ReadResult::Status(StatusView {
-                objective_ids,
-                active_objective,
-                objective_state: configuration
-                    .as_ref()
-                    .map(|value| value.objective_state().clone()),
-            }),
-            ReadQuery::CurrentContext { .. } => ReadResult::CurrentContext(current_context_view(
-                required_configuration(configuration.as_ref())?,
-            )?),
-            ReadQuery::Object { identity, .. } => ReadResult::Object(
-                required_configuration(configuration.as_ref())?
-                    .objects()
-                    .get(&identity)
-                    .cloned(),
-            ),
-            ReadQuery::Trail { objective_id } => {
-                let rows = transaction
-                    .trail_events(Some(&objective_id))
-                    .map_err(store_error)?;
-                ReadResult::Trail(decode_trail_entries(rows)?)
-            }
-            ReadQuery::Proof { .. } => ReadResult::Proof(
-                current_proofs(required_configuration(configuration.as_ref())?)
-                    .map_err(|error| ServiceError::new("invalid_projection", error.to_string()))?,
-            ),
-            ReadQuery::ReviewMaterial { .. } => {
-                let configuration = required_configuration(configuration.as_ref())?;
-                let material = review_material_view(configuration)?;
-                if let Some(material) = &material {
-                    let evidence_ids = review_material_evidence_ids(configuration, material)?;
-                    let snapshots = evidence_snapshots(configuration, &evidence_ids)?;
-                    if !snapshots.is_empty() {
-                        let artifact_store = ArtifactStore::open(admitted.canonical_root())
-                            .map_err(artifact_error)?;
-                        for snapshot in snapshots {
-                            artifact_store.verify(&snapshot).map_err(artifact_error)?;
-                        }
-                    }
-                }
-                ReadResult::ReviewMaterial(material)
-            }
-            ReadQuery::NextActions { .. } => ReadResult::NextActions(next_actions(
-                required_configuration(configuration.as_ref())?,
-                active_objective.as_ref(),
-            )?),
-        };
+        let active = transaction.active_objective().map_err(store_error)?;
+        let state = load_objective_projection_document(&transaction, objective, active.as_ref())?
+            .map(|(document, _)| document.objective_state);
         transaction.commit().map_err(store_error)?;
-        Ok(ReadResponse {
-            heads,
-            objective_id: selected_objective,
-            result,
-        })
+        Ok(state)
     }
 
     pub fn capture_artifact(
@@ -446,24 +261,6 @@ impl CoreService {
             .map_err(artifact_error)?;
         transaction.commit().map_err(store_error)?;
         Ok(snapshot)
-    }
-
-    pub fn read_artifact(
-        &self,
-        request: ReadArtifactRequest,
-    ) -> Result<ReadArtifactResponse, ServiceError> {
-        let (admitted, mut store) = self.open_bound(&request.binding)?;
-        let artifact_store =
-            ArtifactStore::open(admitted.canonical_root()).map_err(artifact_error)?;
-        let transaction = store.begin_read().map_err(store_error)?;
-        let bytes = artifact_store
-            .read(&request.snapshot)
-            .map_err(artifact_error)?;
-        transaction.commit().map_err(store_error)?;
-        Ok(ReadArtifactResponse {
-            snapshot: request.snapshot,
-            bytes,
-        })
     }
 
     pub(crate) fn apply_transition(
@@ -590,8 +387,10 @@ impl CoreService {
 
     pub fn audit(&self, request: AuditRequest) -> Result<AuditResponse, ServiceError> {
         match request.maintenance {
-            None => self.audit_read_only(&request.binding),
-            Some(maintenance) => self.audit_maintenance(&request.binding, maintenance),
+            None => self.audit_read_only(&request.binding, request.limit),
+            Some(maintenance) => {
+                self.audit_maintenance(&request.binding, maintenance, request.limit)
+            }
         }
     }
 
@@ -679,7 +478,11 @@ impl CoreService {
         Ok((admitted, store))
     }
 
-    fn audit_read_only(&self, binding: &ProjectBinding) -> Result<AuditResponse, ServiceError> {
+    fn audit_read_only(
+        &self,
+        binding: &ProjectBinding,
+        limit: Option<u32>,
+    ) -> Result<AuditResponse, ServiceError> {
         let (admitted, mut store) = self.open_bound(binding)?;
         let artifact_store = ArtifactStore::open(admitted.canonical_root());
         let transaction = store.begin_read().map_err(store_error)?;
@@ -782,8 +585,10 @@ impl CoreService {
             )),
         }
         transaction.commit().map_err(store_error)?;
+        let status = audit_status(&issues);
+        let issues = audit_issue_page(issues, limit)?;
         Ok(AuditResponse {
-            status: audit_status(&issues),
+            status,
             project_seq,
             checked_objectives: objective_ids.len(),
             issues,
@@ -795,6 +600,7 @@ impl CoreService {
         &self,
         binding: &ProjectBinding,
         maintenance: MaintenanceRequest,
+        limit: Option<u32>,
     ) -> Result<AuditResponse, ServiceError> {
         let (admitted, mut store) = self.open_bound(binding)?;
         let transaction = store.begin_write().map_err(store_error)?;
@@ -933,8 +739,10 @@ impl CoreService {
             }
         }
         transaction.commit().map_err(store_error)?;
+        let status = audit_status(&issues);
+        let issues = audit_issue_page(issues, limit)?;
         Ok(AuditResponse {
-            status: audit_status(&issues),
+            status,
             project_seq,
             checked_objectives: objective_ids.len(),
             issues,
@@ -968,9 +776,16 @@ impl std::error::Error for ServiceError {}
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
-struct ObjectiveProjectionDocument<'a> {
+struct ObjectiveProjectionDocumentRef<'a> {
     objective_state: &'a ObjectiveState,
     lifecycle: &'a LifecycleProjection,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObjectiveProjectionDocument {
+    objective_state: ObjectiveState,
+    lifecycle: LifecycleProjection,
 }
 
 #[derive(Serialize)]
@@ -992,67 +807,60 @@ struct ProjectReplay {
     active: Option<ObjectiveId>,
 }
 
-fn query_objective(query: &ReadQuery) -> &ObjectiveId {
-    match query {
-        ReadQuery::CurrentContext { objective_id }
-        | ReadQuery::Object { objective_id, .. }
-        | ReadQuery::Trail { objective_id }
-        | ReadQuery::Proof { objective_id }
-        | ReadQuery::ReviewMaterial { objective_id }
-        | ReadQuery::NextActions { objective_id } => objective_id,
-        ReadQuery::Status { .. } => unreachable!("Status is handled before this helper"),
-    }
-}
-
-fn validate_read_query(query: &ReadQuery) -> Result<(), ServiceError> {
-    let objective = match query {
-        ReadQuery::Status { objective_id } => objective_id.as_ref(),
-        ReadQuery::CurrentContext { objective_id }
-        | ReadQuery::Object { objective_id, .. }
-        | ReadQuery::Trail { objective_id }
-        | ReadQuery::Proof { objective_id }
-        | ReadQuery::ReviewMaterial { objective_id }
-        | ReadQuery::NextActions { objective_id } => Some(objective_id),
+fn load_objective_projection_document(
+    transaction: &ReadTransaction<'_>,
+    objective: &ObjectiveId,
+    indexed_active: Option<&ObjectiveId>,
+) -> Result<Option<(ObjectiveProjectionDocument, u64)>, ServiceError> {
+    let Some(stream) = transaction.stream_head(objective).map_err(store_error)? else {
+        return Ok(None);
     };
-    if objective.is_some_and(|id| id.as_str().is_empty()) {
+    let objective_row = transaction
+        .objective_projection(objective)
+        .map_err(store_error)?
+        .ok_or_else(|| {
+            ServiceError::new(
+                "projection_mismatch",
+                "Objective stream has no current projection",
+            )
+        })?;
+    if &objective_row.objective_id != objective
+        || objective_row.project_seq != stream.last_project_seq
+        || objective_row.objective_seq != stream.objective_seq
+        || objective_row.projection_schema != OBJECTIVE_PROJECTION_SCHEMA
+    {
         return Err(ServiceError::new(
-            "invalid_read_query",
-            "Objective identity must not be empty",
+            "projection_mismatch",
+            "Objective projection does not match its stream head or schema",
         ));
     }
-    if let ReadQuery::Object { identity, .. } = query {
-        let identity = match identity {
-            ObjectIdentity::Objective(value) => value.as_str(),
-            ObjectIdentity::ObjectiveSpec(value) => value.objective.as_str(),
-            ObjectIdentity::MapRevision(value) => value.objective.as_str(),
-            ObjectIdentity::Stage(value) => value.as_str(),
-            ObjectIdentity::Criterion(value) => value.as_str(),
-            ObjectIdentity::Route(value) => value.as_str(),
-            ObjectIdentity::Attempt(value) => value.as_str(),
-            ObjectIdentity::Evidence(value) => value.as_str(),
-            ObjectIdentity::ReviewPacket(value) => value.as_str(),
-            ObjectIdentity::ReviewDecision(value) => value.as_str(),
-            ObjectIdentity::WaitCondition(value) => value.as_str(),
-        };
-        if identity.is_empty() {
-            return Err(ServiceError::new(
-                "invalid_read_query",
-                "Object identity must not be empty",
-            ));
-        }
+    let document: ObjectiveProjectionDocument =
+        decode_projection(&objective_row.projection_bytes, "Objective projection")?;
+    if objective_row.is_active != is_active(&document.objective_state)
+        || objective_row.is_active != (indexed_active == Some(objective))
+    {
+        return Err(ServiceError::new(
+            "projection_mismatch",
+            "Objective projection active state does not match the active index",
+        ));
     }
-    Ok(())
+    Ok(Some((document, stream.last_project_seq)))
 }
 
-fn required_configuration(
-    configuration: Option<&DomainConfiguration>,
-) -> Result<&DomainConfiguration, ServiceError> {
-    configuration.ok_or_else(|| {
-        ServiceError::new(
-            "objective_not_found",
-            "the requested Objective does not have a Trail stream",
-        )
-    })
+fn decode_projection<T>(bytes: &[u8], label: &str) -> Result<T, ServiceError>
+where
+    T: DeserializeOwned + Serialize,
+{
+    let value = serde_json::from_slice(bytes).map_err(|error| {
+        ServiceError::new("invalid_projection", format!("{label} is invalid: {error}"))
+    })?;
+    if encode_canonical(&value).map_err(codec_error)? != bytes {
+        return Err(ServiceError::new(
+            "invalid_projection",
+            format!("{label} is not canonical"),
+        ));
+    }
+    Ok(value)
 }
 
 fn command_objective(
@@ -1082,25 +890,6 @@ fn command_objective(
                 "the command requires an active Objective",
             )
         })
-}
-
-fn load_project_read(
-    transaction: &ReadTransaction<'_>,
-    include: Option<&ObjectiveId>,
-) -> Result<ProjectReplay, ServiceError> {
-    let mut objective_ids = transaction.objective_ids().map_err(store_error)?;
-    include_missing_objective(&mut objective_ids, include);
-    let mut objectives = BTreeMap::new();
-    for objective in objective_ids {
-        objectives.insert(
-            objective.clone(),
-            load_replayed_read(transaction, &objective)?,
-        );
-    }
-    finish_project_replay(
-        objectives,
-        transaction.active_objective().map_err(store_error)?,
-    )
 }
 
 fn load_project_write(
@@ -1286,28 +1075,6 @@ fn finish_project_replay(
     Ok(ProjectReplay { objectives, active })
 }
 
-fn load_replayed_read(
-    transaction: &ReadTransaction<'_>,
-    objective: &ObjectiveId,
-) -> Result<ReplayedObjective, ServiceError> {
-    let replayed = replay_event_rows(
-        objective,
-        transaction
-            .trail_events(Some(objective))
-            .map_err(store_error)?,
-    )?;
-    compare_projection(
-        &replayed,
-        transaction
-            .objective_projection(objective)
-            .map_err(store_error)?,
-        transaction
-            .object_projections(objective)
-            .map_err(store_error)?,
-    )?;
-    Ok(replayed)
-}
-
 fn load_replayed_write(
     transaction: &WriteTransaction<'_>,
     objective: &ObjectiveId,
@@ -1429,7 +1196,7 @@ fn projection_rows(
         objective_seq: head.objective_seq,
         is_active: is_active(configuration.objective_state()),
         projection_schema: OBJECTIVE_PROJECTION_SCHEMA.to_owned(),
-        projection_bytes: encode_canonical(&ObjectiveProjectionDocument {
+        projection_bytes: encode_canonical(&ObjectiveProjectionDocumentRef {
             objective_state: configuration.objective_state(),
             lifecycle: configuration.lifecycle(),
         })
@@ -1484,7 +1251,7 @@ fn projection_rows_after_append(
         objective_seq: metadata.objective_seq,
         is_active: is_active(configuration.objective_state()),
         projection_schema: OBJECTIVE_PROJECTION_SCHEMA.to_owned(),
-        projection_bytes: encode_canonical(&ObjectiveProjectionDocument {
+        projection_bytes: encode_canonical(&ObjectiveProjectionDocumentRef {
             objective_state: configuration.objective_state(),
             lifecycle: configuration.lifecycle(),
         })
@@ -1575,18 +1342,15 @@ fn existing_response(
     })
 }
 
-fn decode_trail_entries(rows: Vec<EventRow>) -> Result<Vec<TrailEntry>, ServiceError> {
-    rows.into_iter()
-        .map(|row| {
-            let fact = decode_trail_fact(&row.event_bytes).map_err(codec_error)?;
-            Ok(TrailEntry {
-                project_seq: row.metadata.project_seq,
-                objective_seq: row.metadata.objective_seq,
-                event_digest: sha256_text(&row.event_bytes),
-                fact,
-            })
-        })
-        .collect()
+fn audit_issue_limit(requested: Option<u32>) -> Result<usize, ServiceError> {
+    let limit = requested.unwrap_or(DEFAULT_AUDIT_ISSUE_LIMIT);
+    if limit == 0 || limit > MAX_AUDIT_ISSUE_LIMIT {
+        return Err(ServiceError::new(
+            "invalid_page_limit",
+            format!("audit issue limit must be between 1 and {MAX_AUDIT_ISSUE_LIMIT}"),
+        ));
+    }
+    Ok(limit as usize)
 }
 
 fn build_report_snapshot(
@@ -2366,11 +2130,7 @@ fn transition_material_snapshots(
                 };
                 let dependencies = dependency_view(configuration, packet)
                     .map_err(|error| ServiceError::new("invalid_projection", error.to_string()))?;
-                let material = ReviewMaterialView {
-                    packet: packet.clone(),
-                    dependency_view: dependencies,
-                };
-                required.extend(review_material_evidence_ids(configuration, &material)?);
+                required.extend(review_evidence_ids(configuration, packet, &dependencies)?);
             }
         }
         TransitionInput::CheckWait(input) => {
@@ -2381,11 +2141,11 @@ fn transition_material_snapshots(
             required.extend(input.packet.evidence_set.iter().cloned());
             let dependencies = dependency_view(configuration, &input.packet)
                 .map_err(|error| ServiceError::new("invalid_projection", error.to_string()))?;
-            let material = ReviewMaterialView {
-                packet: input.packet.clone(),
-                dependency_view: dependencies,
-            };
-            required.extend(review_material_evidence_ids(configuration, &material)?);
+            required.extend(review_evidence_ids(
+                configuration,
+                &input.packet,
+                &dependencies,
+            )?);
         }
         TransitionInput::Decision(input) => {
             let packet = configuration
@@ -2400,11 +2160,7 @@ fn transition_material_snapshots(
             required.extend(packet.evidence_set.iter().cloned());
             let dependencies = dependency_view(configuration, packet)
                 .map_err(|error| ServiceError::new("invalid_projection", error.to_string()))?;
-            let material = ReviewMaterialView {
-                packet: packet.clone(),
-                dependency_view: dependencies,
-            };
-            required.extend(review_material_evidence_ids(configuration, &material)?);
+            required.extend(review_evidence_ids(configuration, packet, &dependencies)?);
         }
         TransitionInput::ActivateObjective(_)
         | TransitionInput::AddRoute(_)
@@ -2436,69 +2192,6 @@ fn transition_material_snapshots(
             FrozenObservation::Inline(_) => None,
         })
         .collect())
-}
-
-fn evidence_snapshots(
-    configuration: &DomainConfiguration,
-    required: &BTreeSet<EvidenceId>,
-) -> Result<BTreeSet<CoreSnapshot>, ServiceError> {
-    let evidence = required
-        .iter()
-        .map(|id| {
-            match configuration
-                .objects()
-                .get(&ObjectIdentity::Evidence(id.clone()))
-            {
-                Some(FirstClassObject::Evidence(evidence)) => Ok(evidence),
-                _ => Err(ServiceError::new(
-                    "invalid_projection",
-                    "ReviewPacket references missing Evidence",
-                )),
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(evidence
-        .into_iter()
-        .filter_map(|evidence| match &evidence.observation {
-            FrozenObservation::CoreSnapshot(snapshot) => Some(snapshot.clone()),
-            FrozenObservation::Inline(_) => None,
-        })
-        .collect())
-}
-
-fn review_material_evidence_ids(
-    configuration: &DomainConfiguration,
-    material: &ReviewMaterialView,
-) -> Result<BTreeSet<EvidenceId>, ServiceError> {
-    let mut evidence = material.packet.evidence_set.clone();
-    for decision_id in &material.dependency_view {
-        let decision = match configuration
-            .objects()
-            .get(&ObjectIdentity::ReviewDecision(decision_id.clone()))
-        {
-            Some(FirstClassObject::ReviewDecision(decision)) => decision,
-            _ => {
-                return Err(ServiceError::new(
-                    "invalid_projection",
-                    "DependencyView references a missing ReviewDecision",
-                ));
-            }
-        };
-        let packet = match configuration
-            .objects()
-            .get(&ObjectIdentity::ReviewPacket(decision.packet.clone()))
-        {
-            Some(FirstClassObject::ReviewPacket(packet)) => packet,
-            _ => {
-                return Err(ServiceError::new(
-                    "invalid_projection",
-                    "DependencyView decision references a missing ReviewPacket",
-                ));
-            }
-        };
-        evidence.extend(packet.evidence_set.iter().cloned());
-    }
-    Ok(evidence)
 }
 
 fn sha256_text(bytes: &[u8]) -> String {
@@ -2561,6 +2254,21 @@ fn audit_status(issues: &[AuditIssue]) -> AuditStatus {
     }
 }
 
+fn audit_issue_page(
+    issues: Vec<AuditIssue>,
+    requested_limit: Option<u32>,
+) -> Result<AuditIssuePage, ServiceError> {
+    let limit = audit_issue_limit(requested_limit)?;
+    let total = issues.len() as u64;
+    let items = issues.into_iter().take(limit).collect::<Vec<_>>();
+    Ok(AuditIssuePage {
+        returned: items.len() as u32,
+        total,
+        complete: items.len() as u64 == total,
+        items,
+    })
+}
+
 fn store_error(error: StoreError) -> ServiceError {
     let code = match error {
         StoreError::RequestConflict { .. } => "request_conflict",
@@ -2584,140 +2292,40 @@ fn objective_id(configuration: &crate::domain::DomainConfiguration) -> Option<Ob
     }
 }
 
-fn current_context_view(
-    configuration: &crate::domain::DomainConfiguration,
-) -> Result<Option<CurrentContextView>, ServiceError> {
-    let stage = match configuration.objective_state() {
-        ObjectiveState::Navigating { navigation, .. } => match navigation {
-            NavState::SeekingRoute { stage }
-            | NavState::Ready { stage, .. }
-            | NavState::Attempting { stage, .. }
-            | NavState::Reviewing { stage, .. }
-            | NavState::Waiting { stage, .. } => stage,
-        },
-        _ => return Ok(None),
-    };
-    let context = acceptance_context(configuration, stage)
-        .map_err(|error| ServiceError::new("invalid_projection", error.to_string()))?;
-    Ok(Some(CurrentContextView {
-        stage: stage.clone(),
-        context,
-    }))
-}
-
-fn review_material_view(
-    configuration: &crate::domain::DomainConfiguration,
-) -> Result<Option<ReviewMaterialView>, ServiceError> {
-    let packet_id = match configuration.objective_state() {
-        ObjectiveState::Navigating {
-            navigation: NavState::Reviewing { packet, .. },
-            ..
-        } => packet,
-        _ => return Ok(None),
-    };
-    let packet = match configuration
-        .objects()
-        .get(&ObjectIdentity::ReviewPacket(packet_id.clone()))
-    {
-        Some(FirstClassObject::ReviewPacket(packet)) => packet.clone(),
-        _ => {
-            return Err(ServiceError::new(
-                "invalid_projection",
-                "Reviewing state references a missing ReviewPacket",
-            ));
-        }
-    };
-    let dependencies = dependency_view(configuration, &packet)
-        .map_err(|error| ServiceError::new("invalid_projection", error.to_string()))?;
-    Ok(Some(ReviewMaterialView {
-        packet,
-        dependency_view: dependencies,
-    }))
-}
-
-fn next_actions(
-    configuration: &crate::domain::DomainConfiguration,
-    active_objective: Option<&ObjectiveId>,
-) -> Result<Vec<NextAction>, ServiceError> {
-    fn action(transition: TransitionKind) -> NextAction {
-        NextAction {
-            transition,
-            required_input: required_input_fields(transition)
-                .iter()
-                .map(|field| (*field).to_owned())
-                .collect(),
-        }
-    }
-
-    let mut result = match configuration.objective_state() {
-        ObjectiveState::Idle if active_objective.is_none() => {
-            vec![action(TransitionKind::ActivateObjective)]
-        }
-        ObjectiveState::Idle => Vec::new(),
-        ObjectiveState::Mapping { .. } => vec![action(TransitionKind::InstallMap)],
-        ObjectiveState::Navigating { navigation, .. } => match navigation {
-            NavState::SeekingRoute { .. } => {
-                let mut actions = vec![action(TransitionKind::AddRoute)];
-                let has_selectable_route = configuration.objects().values().any(|object| {
-                    let FirstClassObject::Route(route) = object else {
-                        return false;
-                    };
-                    crate::domain::validate_transition(
-                        configuration,
-                        &TransitionInput::SelectRoute(crate::domain::SelectRouteInput {
-                            route: route.id.clone(),
-                        }),
-                    )
-                    .is_ok()
-                });
-                if has_selectable_route {
-                    actions.push(action(TransitionKind::SelectRoute));
-                }
-                actions
+fn review_evidence_ids(
+    configuration: &DomainConfiguration,
+    packet: &ReviewPacket,
+    dependencies: &BTreeSet<ReviewDecisionId>,
+) -> Result<BTreeSet<EvidenceId>, ServiceError> {
+    let mut evidence = packet.evidence_set.clone();
+    for decision_id in dependencies {
+        let decision = match configuration
+            .objects()
+            .get(&ObjectIdentity::ReviewDecision(decision_id.clone()))
+        {
+            Some(FirstClassObject::ReviewDecision(decision)) => decision,
+            _ => {
+                return Err(ServiceError::new(
+                    "invalid_projection",
+                    "DependencyView references a missing ReviewDecision",
+                ));
             }
-            NavState::Ready { .. } => vec![action(TransitionKind::StartAttempt)],
-            NavState::Attempting { stage, attempt, .. } => {
-                let mut actions = vec![action(TransitionKind::RecordEvidence)];
-                let current_attempt = match configuration
-                    .objects()
-                    .get(&ObjectIdentity::Attempt(attempt.clone()))
-                {
-                    Some(FirstClassObject::Attempt(value)) => value,
-                    _ => {
-                        return Err(ServiceError::new(
-                            "invalid_projection",
-                            "current Attempt object is missing",
-                        ));
-                    }
-                };
-                let evidence = evidence_universe(configuration, stage, &current_attempt.context)
-                    .map_err(|error| ServiceError::new("invalid_projection", error.to_string()))?;
-                if !evidence.is_empty() {
-                    actions.push(action(TransitionKind::SealAttempt));
-                }
-                actions
+        };
+        let dependency_packet = match configuration
+            .objects()
+            .get(&ObjectIdentity::ReviewPacket(decision.packet.clone()))
+        {
+            Some(FirstClassObject::ReviewPacket(packet)) => packet,
+            _ => {
+                return Err(ServiceError::new(
+                    "invalid_projection",
+                    "DependencyView decision references a missing ReviewPacket",
+                ));
             }
-            NavState::Reviewing { .. } => {
-                vec![action(TransitionKind::Decision)]
-            }
-            NavState::Waiting { .. } => vec![action(TransitionKind::CheckWait)],
-        },
-        ObjectiveState::Achieved { .. } | ObjectiveState::Abandoned { .. } => Vec::new(),
-    };
-    if matches!(
-        configuration.objective_state(),
-        ObjectiveState::Navigating { .. }
-    ) {
-        result.push(action(TransitionKind::RequestRemap));
+        };
+        evidence.extend(dependency_packet.evidence_set.iter().cloned());
     }
-    if matches!(
-        configuration.objective_state(),
-        ObjectiveState::Mapping { .. } | ObjectiveState::Navigating { .. }
-    ) {
-        result.push(action(TransitionKind::ReviseObjective));
-        result.push(action(TransitionKind::Abandon));
-    }
-    Ok(result)
+    Ok(evidence)
 }
 
 fn referenced_snapshots(
@@ -2834,14 +2442,14 @@ fn validate_live_confirmation(
 mod helper_tests {
     use super::*;
     use crate::domain::{
-        AbandonConfirmation, AbandonInput, ActivateObjectiveInput, AddRouteInput, Attempt,
-        AttemptBound, CanonicalValue, CarryVerdict, Criterion, CriterionId, CriterionJudgment,
-        CriterionScope, DecisionInput, EvidenceClaim, EvidencePurpose, EvidenceSubject,
-        HasIdentity, InstallMapInput, MapRevision, ObjectiveConfirmation,
+        AbandonConfirmation, AbandonInput, AcceptanceContext, ActivateObjectiveInput,
+        AddRouteInput, Attempt, AttemptBound, CanonicalValue, CarryVerdict, Criterion, CriterionId,
+        CriterionJudgment, CriterionScope, DecisionInput, EvidenceClaim, EvidencePurpose,
+        EvidenceSubject, HasIdentity, InstallMapInput, MapRevision, ObjectiveConfirmation,
         ObjectiveConfirmationAction, ObjectiveSpec, RecordEvidenceInput, RequestRemapInput,
         ReviewAction, ReviewDecision, ReviseObjectiveInput, Route, RouteId, SealReason,
         SelectRouteInput, Stage, StageContract, StageDependency, StageKind, StartAttemptInput,
-        StructuralContext, initial_configuration, structural_context,
+        StructuralContext, acceptance_context, initial_configuration, structural_context,
     };
     use rusqlite::Connection;
     use std::fs;
@@ -2864,6 +2472,11 @@ mod helper_tests {
     enum AchievedLane {
         DirectMainObservation,
         InspectedCandidate(ModelExternalCandidate),
+    }
+
+    struct TestCurrentContext {
+        stage: StageId,
+        context: AcceptanceContext,
     }
 
     impl TestProject {
@@ -2905,20 +2518,22 @@ mod helper_tests {
                 .map(|outcome| outcome.response)
         }
 
-        fn trail(&self, objective: &ObjectiveId) -> Vec<TrailEntry> {
-            let response = self
-                .service
-                .read(ReadRequest {
-                    binding: self.binding.clone(),
-                    query: ReadQuery::Trail {
-                        objective_id: objective.clone(),
-                    },
+        fn trail(&self, objective: &ObjectiveId) -> Vec<TrailFact> {
+            let connection = Connection::open(self.database_path()).expect("open test database");
+            let mut statement = connection
+                .prepare(
+                    "SELECT event_bytes FROM trail_events
+                     WHERE objective_id = ?1 ORDER BY objective_seq",
+                )
+                .expect("prepare Trail test read");
+            statement
+                .query_map([objective.as_str()], |row| row.get::<_, Vec<u8>>(0))
+                .expect("query Trail test bytes")
+                .map(|row| {
+                    decode_trail_fact(&row.expect("read Trail test bytes"))
+                        .expect("decode Trail test fact")
                 })
-                .expect("read Trail");
-            match response.result {
-                ReadResult::Trail(entries) => entries,
-                result => panic!("expected Trail result, got {result:?}"),
-            }
+                .collect()
         }
 
         fn database_path(&self) -> PathBuf {
@@ -2933,15 +2548,25 @@ mod helper_tests {
         }
 
         fn heads(&self, objective: &ObjectiveId) -> HeadBinding {
-            self.service
-                .read(ReadRequest {
-                    binding: self.binding.clone(),
-                    query: ReadQuery::Status {
-                        objective_id: Some(objective.clone()),
-                    },
-                })
-                .expect("read service heads")
-                .heads
+            let connection = Connection::open(self.database_path()).expect("open test database");
+            let project_seq = connection
+                .query_row(
+                    "SELECT project_seq FROM schema_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .expect("read project head");
+            let objective_seq = connection
+                .query_row(
+                    "SELECT objective_seq FROM objective_streams WHERE objective_id = ?1",
+                    [objective.as_str()],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap_or(0);
+            HeadBinding {
+                expected_project_seq: project_seq,
+                expected_objective_seq: objective_seq,
+            }
         }
 
         fn blob_path(&self, snapshot: &CoreSnapshot) -> PathBuf {
@@ -3198,19 +2823,50 @@ mod helper_tests {
         })
     }
 
-    fn current_context(project: &TestProject, objective: &ObjectiveId) -> CurrentContextView {
-        let response = project
-            .service
-            .read(ReadRequest {
-                binding: project.binding.clone(),
-                query: ReadQuery::CurrentContext {
-                    objective_id: objective.clone(),
-                },
-            })
-            .expect("read current context");
-        match response.result {
-            ReadResult::CurrentContext(Some(context)) => context,
-            result => panic!("expected current context, got {result:?}"),
+    fn current_context(project: &TestProject, objective: &ObjectiveId) -> TestCurrentContext {
+        let configuration = configuration(project, objective);
+        let stage = match configuration.objective_state() {
+            ObjectiveState::Navigating { navigation, .. } => match navigation {
+                NavState::SeekingRoute { stage }
+                | NavState::Ready { stage, .. }
+                | NavState::Attempting { stage, .. }
+                | NavState::Reviewing { stage, .. }
+                | NavState::Waiting { stage, .. } => stage.clone(),
+            },
+            state => panic!("expected navigating state, got {state:?}"),
+        };
+        let context = acceptance_context(&configuration, &stage).expect("derive current context");
+        TestCurrentContext { stage, context }
+    }
+
+    fn configuration(project: &TestProject, objective: &ObjectiveId) -> DomainConfiguration {
+        replay(&project.trail(objective)).expect("replay test Objective")
+    }
+
+    fn object_value(
+        project: &TestProject,
+        objective: &ObjectiveId,
+        identity: ObjectIdentity,
+    ) -> FirstClassObject {
+        configuration(project, objective)
+            .objects()
+            .get(&identity)
+            .cloned()
+            .expect("read object from replayed Trail")
+    }
+
+    fn review_packet(project: &TestProject, objective: &ObjectiveId) -> ReviewPacket {
+        let configuration = configuration(project, objective);
+        let packet = match configuration.objective_state() {
+            ObjectiveState::Navigating {
+                navigation: NavState::Reviewing { packet, .. },
+                ..
+            } => packet.clone(),
+            state => panic!("expected Reviewing state, got {state:?}"),
+        };
+        match object_value(project, objective, ObjectIdentity::ReviewPacket(packet)) {
+            FirstClassObject::ReviewPacket(packet) => packet,
+            object => panic!("expected ReviewPacket object, got {object:?}"),
         }
     }
 
@@ -3245,7 +2901,6 @@ mod helper_tests {
         });
         let project = TestProject::new();
         let mut mutation_wires = Vec::new();
-        let mut read_wires = Vec::new();
         let (stage, decision_id) = {
             let mut apply = |expected: HeadBinding, request_id: &str, command: MutationCommand| {
                 let response = project
@@ -3286,20 +2941,7 @@ mod helper_tests {
                 }),
             );
 
-            let context_response = project
-                .service
-                .read(ReadRequest {
-                    binding: project.binding.clone(),
-                    query: ReadQuery::CurrentContext {
-                        objective_id: objective.clone(),
-                    },
-                })
-                .expect("main agent reads the current typed context");
-            let context = match &context_response.result {
-                ReadResult::CurrentContext(Some(context)) => context.clone(),
-                result => panic!("expected current context, got {result:?}"),
-            };
-            read_wires.push(serde_json::to_value(&context_response).unwrap());
+            let context_value = current_context(&project, &objective).context;
             let attempt = crate::domain::AttemptId::new("attempt-achieved");
             apply(
                 heads(4, 4),
@@ -3312,7 +2954,7 @@ mod helper_tests {
                         bound: AttemptBound::TerminationCondition(
                             "one inspected frozen observation exists".to_owned(),
                         ),
-                        context: context.context.clone(),
+                        context: context_value.clone(),
                     },
                 }),
             );
@@ -3349,7 +2991,7 @@ mod helper_tests {
                     evidence: Evidence {
                         id: evidence.clone(),
                         subject: EvidenceSubject::Attempt(attempt.clone()),
-                        context: context.context,
+                        context: context_value,
                         purpose: EvidencePurpose::StageReview,
                         claims: BTreeMap::from([(criterion.clone(), EvidenceClaim::Supports)]),
                         observation,
@@ -3374,39 +3016,12 @@ mod helper_tests {
             );
             apply(heads(6, 6), "seal-achieved-attempt", seal_command);
 
-            let trail_response = project
-                .service
-                .read(ReadRequest {
-                    binding: project.binding.clone(),
-                    query: ReadQuery::Trail {
-                        objective_id: objective.clone(),
-                    },
-                })
-                .expect("read Core Trail after Seal");
-            let trail_packet = match &trail_response.result {
-                ReadResult::Trail(entries) => match &entries.last().unwrap().fact.input {
-                    TransitionInput::SealAttempt(input) => input.packet.clone(),
-                    input => panic!("expected Core-materialized Seal, got {input:?}"),
-                },
-                result => panic!("expected Trail, got {result:?}"),
-            };
-            read_wires.push(serde_json::to_value(&trail_response).unwrap());
+            assert_eq!(
+                project.trail(&objective).last().map(TrailFact::transition),
+                Some(TransitionKind::SealAttempt)
+            );
 
-            let material_response = project
-                .service
-                .read(ReadRequest {
-                    binding: project.binding.clone(),
-                    query: ReadQuery::ReviewMaterial {
-                        objective_id: objective.clone(),
-                    },
-                })
-                .expect("main agent reads Core review material");
-            let packet = match &material_response.result {
-                ReadResult::ReviewMaterial(Some(material)) => material.packet.clone(),
-                result => panic!("expected review material, got {result:?}"),
-            };
-            read_wires.push(serde_json::to_value(&material_response).unwrap());
-            assert_eq!(packet, trail_packet);
+            let packet = review_packet(&project, &objective);
             assert_eq!(packet.attempt, attempt);
             assert_eq!(packet.evidence_set, BTreeSet::from([evidence]));
 
@@ -3445,56 +3060,21 @@ mod helper_tests {
             (stage, decision_id)
         };
 
-        let status_response = project
-            .service
-            .read(ReadRequest {
-                binding: project.binding.clone(),
-                query: ReadQuery::Status {
-                    objective_id: Some(objective.clone()),
-                },
-            })
-            .expect("fresh status replays and validates the committed Trail");
-        assert_eq!(status_response.heads, heads(8, 8));
-        match &status_response.result {
-            ReadResult::Status(StatusView {
-                objective_state:
-                    Some(ObjectiveState::Achieved {
-                        objective: achieved,
-                        manifest,
-                        ..
-                    }),
+        assert_eq!(project.heads(&objective), heads(8, 8));
+        match configuration(&project, &objective).objective_state() {
+            ObjectiveState::Achieved {
+                objective: achieved,
+                manifest,
                 ..
-            }) => {
+            } => {
                 assert_eq!(achieved, &objective);
-                assert_eq!(manifest.get(&stage.id), Some(&decision_id));
+                assert_eq!(manifest.len(), 1);
+                assert_eq!(manifest, &BTreeMap::from([(stage.id.clone(), decision_id)]));
             }
-            result => panic!("expected fresh Achieved status, got {result:?}"),
-        }
-        read_wires.push(serde_json::to_value(&status_response).unwrap());
-
-        for query in [
-            ReadQuery::Object {
-                objective_id: objective.clone(),
-                identity: ObjectIdentity::Objective(objective.clone()),
-            },
-            ReadQuery::Proof {
-                objective_id: objective.clone(),
-            },
-            ReadQuery::NextActions {
-                objective_id: objective.clone(),
-            },
-        ] {
-            let response = project
-                .service
-                .read(ReadRequest {
-                    binding: project.binding.clone(),
-                    query,
-                })
-                .expect("default Core read remains available after Achieved");
-            read_wires.push(serde_json::to_value(&response).unwrap());
+            state => panic!("expected fresh Achieved state, got {state:?}"),
         }
 
-        for wire in mutation_wires.iter().chain(&read_wires) {
+        for wire in &mutation_wires {
             let encoded = serde_json::to_string(wire).unwrap();
             for field in [
                 "csv",
@@ -3517,182 +3097,10 @@ mod helper_tests {
     }
 
     #[test]
-    fn idle_next_actions_do_not_choose_routes_judgments_or_roles() {
-        let actions = next_actions(&initial_configuration(), None).unwrap();
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].transition, TransitionKind::ActivateObjective);
-        let encoded = serde_json::to_string(&actions).unwrap();
-        assert!(!encoded.contains("driver"));
-        assert!(!encoded.contains("judge"));
-        assert!(!encoded.contains("selected_route"));
-    }
-
-    #[test]
-    fn next_actions_lists_only_transition_classes_with_a_live_legal_input() {
-        let project = TestProject::new();
-        let objective = ObjectiveId::new("objective-next-actions");
-        let other = ObjectiveId::new("objective-blocked-by-active");
-        let read_kinds = |objective: &ObjectiveId| {
-            let response = project
-                .service
-                .read(ReadRequest {
-                    binding: project.binding.clone(),
-                    query: ReadQuery::NextActions {
-                        objective_id: objective.clone(),
-                    },
-                })
-                .unwrap();
-            match response.result {
-                ReadResult::NextActions(actions) => actions
-                    .into_iter()
-                    .map(|action| action.transition)
-                    .collect::<BTreeSet<_>>(),
-                result => panic!("expected next actions, got {result:?}"),
-            }
-        };
-
-        project
-            .apply(
-                heads(0, 0),
-                "activate-next-actions",
-                activate_command(
-                    &project.binding.project_id,
-                    &objective,
-                    heads(0, 0),
-                    "expose only enabled transition classes",
-                ),
-            )
-            .unwrap();
-        assert!(
-            read_kinds(&other).is_empty(),
-            "an absent Objective cannot Activate while another Objective is active"
-        );
-
-        project
-            .apply(
-                heads(1, 1),
-                "install-next-actions-map",
-                install_map_command(&objective),
-            )
-            .unwrap();
-        let seeking = read_kinds(&objective);
-        assert!(seeking.contains(&TransitionKind::AddRoute));
-        assert!(!seeking.contains(&TransitionKind::SelectRoute));
-
-        let map = map_revision(&objective);
-        let stage = stage(&objective);
-        let context = current_context(&project, &objective).context;
-        let (route, command) = route_command(
-            &objective,
-            &stage.id,
-            structural_context(&map, &stage.id).unwrap(),
-        );
-        project
-            .apply(heads(2, 2), "add-next-actions-route", command)
-            .unwrap();
-        assert!(
-            read_kinds(&objective).contains(&TransitionKind::SelectRoute),
-            "an available current-Stage Route enables SelectRoute"
-        );
-        project
-            .apply(
-                heads(3, 3),
-                "select-next-actions-route",
-                MutationCommand::SelectRoute(SelectRouteInput {
-                    route: route.clone(),
-                }),
-            )
-            .unwrap();
-        let attempt = crate::domain::AttemptId::new("attempt-next-actions");
-        project
-            .apply(
-                heads(4, 4),
-                "start-next-actions-attempt",
-                MutationCommand::StartAttempt(StartAttemptInput {
-                    attempt: Attempt {
-                        id: attempt.clone(),
-                        route,
-                        ordinal: 1,
-                        bound: AttemptBound::TerminationCondition(
-                            "one admitted observation exists".to_owned(),
-                        ),
-                        context: context.clone(),
-                    },
-                }),
-            )
-            .unwrap();
-        let empty_attempt = read_kinds(&objective);
-        assert!(empty_attempt.contains(&TransitionKind::RecordEvidence));
-        assert!(!empty_attempt.contains(&TransitionKind::SealAttempt));
-
-        let criterion = criterion(&objective);
-        project
-            .apply(
-                heads(5, 5),
-                "record-next-actions-evidence",
-                MutationCommand::RecordEvidence(RecordEvidenceInput {
-                    evidence: Evidence {
-                        id: EvidenceId::new("evidence-next-actions"),
-                        subject: EvidenceSubject::Attempt(attempt),
-                        context,
-                        purpose: EvidencePurpose::StageReview,
-                        claims: BTreeMap::from([(criterion.id, EvidenceClaim::Supports)]),
-                        observation: FrozenObservation::Inline(CanonicalValue::String(
-                            "the bounded observation is present".to_owned(),
-                        )),
-                        provenance: CanonicalValue::String(
-                            "main agent inspected the fixture".to_owned(),
-                        ),
-                    },
-                }),
-            )
-            .unwrap();
-        assert!(read_kinds(&objective).contains(&TransitionKind::SealAttempt));
-    }
-
-    #[test]
-    fn empty_configuration_has_no_context_material_or_snapshot() {
-        let configuration = initial_configuration();
-        assert_eq!(objective_id(&configuration), None);
-        assert_eq!(current_context_view(&configuration).unwrap(), None);
-        assert_eq!(review_material_view(&configuration).unwrap(), None);
-        assert!(referenced_snapshots(&configuration).is_empty());
-    }
-
-    #[test]
     fn evidence_purpose_remains_a_domain_value() {
         assert_ne!(
             EvidencePurpose::StageReview,
             EvidencePurpose::WaitResolution
-        );
-    }
-
-    #[test]
-    fn read_query_is_closed_and_rejects_empty_semantic_identities() {
-        assert!(
-            serde_json::from_value::<ReadQuery>(serde_json::json!({
-                "kind": "trail",
-                "objective_id": "objective-1",
-                "extra": true
-            }))
-            .is_err()
-        );
-        assert_eq!(
-            validate_read_query(&ReadQuery::Trail {
-                objective_id: ObjectiveId::new("")
-            })
-            .unwrap_err()
-            .code,
-            "invalid_read_query"
-        );
-        assert_eq!(
-            validate_read_query(&ReadQuery::Object {
-                objective_id: ObjectiveId::new("objective-1"),
-                identity: ObjectIdentity::Evidence(EvidenceId::new("")),
-            })
-            .unwrap_err()
-            .code,
-            "invalid_read_query"
         );
     }
 
@@ -4301,25 +3709,11 @@ mod helper_tests {
         );
         assert_eq!(project.event_count(), 1);
 
-        let status = project
-            .service
-            .read(ReadRequest {
-                binding: project.binding.clone(),
-                query: ReadQuery::Status { objective_id: None },
-            })
-            .expect("read serialized activation result");
-        assert_eq!(status.heads, heads(1, 1));
-        let ReadResult::Status(status) = status.result else {
-            panic!("expected project status")
-        };
-        assert_eq!(status.objective_ids.len(), 1);
-        assert_eq!(
-            status.active_objective.as_ref(),
-            Some(&committed[0].response.objective_id)
-        );
+        let committed_objective = &committed[0].response.objective_id;
+        assert_eq!(project.heads(committed_objective), heads(1, 1));
         assert!(matches!(
-            status.objective_state,
-            Some(ObjectiveState::Mapping { .. })
+            configuration(&project, committed_objective).objective_state(),
+            ObjectiveState::Mapping { objective, .. } if objective == committed_objective
         ));
 
         let audit = project
@@ -4327,12 +3721,13 @@ mod helper_tests {
             .audit(AuditRequest {
                 binding: project.binding.clone(),
                 maintenance: None,
+                limit: None,
             })
             .expect("audit the concurrent activation result");
         assert_eq!(audit.status, AuditStatus::Healthy);
         assert_eq!(audit.project_seq, 1);
         assert_eq!(audit.checked_objectives, 1);
-        assert!(audit.issues.is_empty());
+        assert!(audit.issues.items.is_empty());
     }
 
     #[test]
@@ -4448,10 +3843,11 @@ mod helper_tests {
             .audit(AuditRequest {
                 binding: project.binding.clone(),
                 maintenance: None,
+                limit: None,
             })
             .expect("audit damaged projection");
         assert_eq!(degraded.status, AuditStatus::Degraded);
-        assert!(degraded.issues.iter().any(|issue| {
+        assert!(degraded.issues.items.iter().any(|issue| {
             issue.code == "projection_mismatch" && issue.objective_id.as_ref() == Some(&objective)
         }));
 
@@ -4463,6 +3859,7 @@ mod helper_tests {
                     action: MaintenanceAction::RebuildProjection,
                     expected_project_seq: 1,
                 }),
+                limit: None,
             })
             .expect("rebuild projection from Trail");
         assert_eq!(rebuilt.status, AuditStatus::Healthy);
@@ -4655,20 +4052,7 @@ mod helper_tests {
                 }),
             )
             .expect("seal dependency Attempt");
-        let dependency_packet = match project
-            .service
-            .read(ReadRequest {
-                binding: project.binding.clone(),
-                query: ReadQuery::ReviewMaterial {
-                    objective_id: objective.clone(),
-                },
-            })
-            .expect("read primary review material")
-            .result
-        {
-            ReadResult::ReviewMaterial(Some(material)) => material.packet,
-            result => panic!("expected dependency review material, got {result:?}"),
-        };
+        let dependency_packet = review_packet(&project, &objective);
         assert_eq!(
             dependency_packet.evidence_set,
             BTreeSet::from([dependency_evidence])
@@ -4780,30 +4164,20 @@ mod helper_tests {
                 }),
             )
             .expect("seal carried Stage Attempt");
-        let carried_material = match project
-            .service
-            .read(ReadRequest {
-                binding: project.binding.clone(),
-                query: ReadQuery::ReviewMaterial {
-                    objective_id: objective.clone(),
-                },
-            })
-            .expect("read carried Stage review material")
-            .result
-        {
-            ReadResult::ReviewMaterial(Some(material)) => material,
-            result => panic!("expected carried Stage review material, got {result:?}"),
-        };
+        let carried_packet = review_packet(&project, &objective);
         assert_eq!(
-            carried_material.packet.evidence_set,
+            carried_packet.evidence_set,
             BTreeSet::from([carried_evidence])
         );
         assert_eq!(
-            carried_material.packet.context.dependency_proofs,
+            carried_packet.context.dependency_proofs,
             BTreeMap::from([(dependency_stage.identity(), dependency_decision.clone())])
         );
+        let dependency_material =
+            dependency_view(&configuration(&project, &objective), &carried_packet)
+                .expect("derive carried dependency material");
         assert_eq!(
-            carried_material.dependency_view,
+            dependency_material,
             BTreeSet::from([dependency_decision.clone()])
         );
         let carried_decision = ReviewDecisionId::new("decision-carry-dependent");
@@ -4814,7 +4188,7 @@ mod helper_tests {
                 MutationCommand::Decision(DecisionInput {
                     decision: ReviewDecision {
                         id: carried_decision.clone(),
-                        packet: carried_material.packet.id,
+                        packet: carried_packet.id,
                         judgments: BTreeMap::from([(
                             carried_criterion.identity(),
                             CriterionJudgment::Satisfied,
@@ -4874,21 +4248,9 @@ mod helper_tests {
                 heads(15, 15),
                 "failed carry must preserve both heads"
             );
-            let status = project
-                .service
-                .read(ReadRequest {
-                    binding: project.binding.clone(),
-                    query: ReadQuery::Status {
-                        objective_id: Some(objective.clone()),
-                    },
-                })
-                .expect("read state after rejected carry");
             assert!(matches!(
-                status.result,
-                ReadResult::Status(StatusView {
-                    objective_state: Some(ObjectiveState::Mapping { .. }),
-                    ..
-                })
+                configuration(&project, &objective).objective_state(),
+                ObjectiveState::Mapping { .. }
             ));
         };
         assert_rejected_install_state();
@@ -4929,24 +4291,9 @@ mod helper_tests {
             16,
             "repair permits exactly one install event"
         );
-        let status = project
-            .service
-            .read(ReadRequest {
-                binding: project.binding.clone(),
-                query: ReadQuery::Status {
-                    objective_id: Some(objective.clone()),
-                },
-            })
-            .expect("read state after repaired transitive carry");
         assert!(matches!(
-            status.result,
-            ReadResult::Status(StatusView {
-                objective_state: Some(ObjectiveState::Achieved { manifest, .. }),
-                ..
-            }) if manifest == BTreeMap::from([
-                (dependency_stage.id, dependency_decision),
-                (carried_stage.id, carried_decision),
-            ])
+            configuration(&project, &objective).objective_state(),
+            ObjectiveState::Achieved { manifest, .. } if manifest.len() == 2
         ));
     }
 
@@ -5114,7 +4461,7 @@ mod helper_tests {
 
         let trail = project.trail(&objective);
         assert_eq!(trail.len(), 10);
-        let TransitionInput::SealAttempt(materialized) = &trail.last().unwrap().fact.input else {
+        let TransitionInput::SealAttempt(materialized) = &trail.last().unwrap().input else {
             panic!("last Trail fact must be the materialized SealAttempt");
         };
         assert_eq!(materialized.packet.attempt, attempt);
@@ -5166,6 +4513,7 @@ mod helper_tests {
                     action: MaintenanceAction::RebuildProjection,
                     expected_project_seq: 10,
                 }),
+                limit: None,
             })
             .expect("projection rebuild must remain independent of artifact availability");
         assert_eq!(rebuilt.status, AuditStatus::Degraded);
@@ -5176,6 +4524,7 @@ mod helper_tests {
         assert!(
             rebuilt
                 .issues
+                .items
                 .iter()
                 .any(|issue| issue.code == "artifact_integrity_failed")
         );

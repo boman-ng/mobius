@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -158,9 +159,12 @@ fn assert_tool_success(response: &Value) -> &Value {
     assert!(response.get("error").is_none());
     assert_eq!(response["result"]["isError"], false);
     let structured = &response["result"]["structuredContent"];
-    let encoded = serde_json::to_string(structured).expect("structured result must serialize");
     assert_eq!(response["result"]["content"][0]["type"], "text");
-    assert_eq!(response["result"]["content"][0]["text"], encoded);
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool text must be a string");
+    assert!(text.len() < 128, "tool text must remain a compact hint");
+    assert!(!text.contains(&structured.to_string()));
     structured
 }
 
@@ -213,6 +217,69 @@ fn call_tool_with_thread(
             "_meta": metadata
         }),
     )
+}
+
+fn readonly_connection(root: &Path) -> Connection {
+    let connection = Connection::open_with_flags(
+        root.join(".mobius/mobius.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open Mobius test database read-only");
+    connection
+        .pragma_update(None, "query_only", true)
+        .expect("enable query_only for test observation");
+    connection
+}
+
+fn projected_object(root: &Path, objective: &str, kind: &str, id: &str) -> Value {
+    let connection = readonly_connection(root);
+    let mut statement = connection
+        .prepare(
+            "SELECT projection_bytes FROM object_projection
+             WHERE objective_id = ?1 AND object_kind = ?2 ORDER BY object_id",
+        )
+        .expect("prepare projected object read");
+    statement
+        .query_map([objective, kind], |row| row.get::<_, Vec<u8>>(0))
+        .expect("query projected objects")
+        .map(|row| serde_json::from_slice::<Value>(&row.expect("read projected object")).unwrap())
+        .find(|object| object[kind]["id"] == id)
+        .unwrap_or_else(|| panic!("missing {kind} projection {id}"))
+}
+
+fn objective_projection(root: &Path, objective: &str) -> Value {
+    let bytes = readonly_connection(root)
+        .query_row(
+            "SELECT projection_bytes FROM objective_projection WHERE objective_id = ?1",
+            [objective],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .expect("read Objective projection");
+    serde_json::from_slice(&bytes).expect("decode Objective projection")
+}
+
+fn current_review_packet(root: &Path, objective: &str) -> Value {
+    let projection = objective_projection(root, objective);
+    let packet_id =
+        projection["objective_state"]["navigating"]["navigation"]["reviewing"]["packet"]
+            .as_str()
+            .expect("Reviewing projection contains a Packet id");
+    projected_object(root, objective, "review_packet", packet_id)
+}
+
+fn readonly_audit(root: &Path, project_id: &str) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_mobius"))
+        .args(["audit", project_id])
+        .current_dir(root)
+        .env_clear()
+        .output()
+        .expect("start read-only audit CLI");
+    assert!(
+        output.status.success(),
+        "read-only audit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode audit CLI output")
 }
 
 fn objective_spec(objective_id: &str, revision: u64) -> Value {
@@ -560,21 +627,11 @@ fn advance_public_mcp_to_attempting(
         json!({"select_route": {"route": route_id}}),
     );
 
-    let current_context = call_tool(
-        process,
-        7,
-        "mobius_read",
-        json!({
-            "binding": {"project_root": root, "project_id": project_id},
-            "query": {"kind": "current_context", "objective_id": objective_id}
-        }),
-        root,
-    );
-    let current_context = assert_tool_success(&current_context);
-    assert_eq!(current_context["heads"]["expected_project_seq"], 4);
-    assert_eq!(current_context["heads"]["expected_objective_seq"], 4);
-    assert_eq!(current_context["result"]["value"]["stage"], stage_id);
-    let context = current_context["result"]["value"]["context"].clone();
+    let route = projected_object(root, &objective_id, "route", &route_id);
+    let context = json!({
+        "structural": route["route"]["structural_context"],
+        "dependency_proofs": {}
+    });
 
     apply_e2e_transition(
         process,
@@ -671,31 +728,17 @@ fn advance_public_mcp_to_reviewing(
         }),
     );
 
-    let review = call_tool(
-        process,
-        attempting.next_rpc_id + 2,
-        "mobius_read",
-        json!({
-            "binding": {
-                "project_root": root,
-                "project_id": attempting.project_id
-            },
-            "query": {
-                "kind": "review_material",
-                "objective_id": attempting.objective_id
-            }
-        }),
-        root,
+    let packet = current_review_packet(root, &attempting.objective_id);
+    assert_eq!(packet["review_packet"]["attempt"], attempting.attempt_id);
+    assert_eq!(
+        packet["review_packet"]["evidence_set"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
     );
-    let review = assert_tool_success(&review);
-    assert_eq!(review["heads"]["expected_project_seq"], 7);
-    assert_eq!(review["heads"]["expected_objective_seq"], 7);
-    let packet = &review["result"]["value"]["packet"];
-    assert_eq!(packet["attempt"], attempting.attempt_id);
-    assert_eq!(packet["evidence_set"].as_array().map(Vec::len), Some(1));
-    let packet_id = packet["id"]
+    let packet_id = packet["review_packet"]["id"]
         .as_str()
-        .expect("Core review material contains a Packet id")
+        .expect("ReviewPacket projection contains an id")
         .to_owned();
 
     ReviewingE2e {
@@ -853,26 +896,15 @@ fn finish_public_mcp_achieved(
         }),
     );
 
-    let review = call_tool(
-        process,
-        first_rpc_id + 1,
-        "mobius_read",
-        json!({
-            "binding": {"project_root": root, "project_id": fixture.project_id},
-            "query": {"kind": "review_material", "objective_id": fixture.objective_id}
-        }),
-        root,
-    );
-    let review = assert_tool_success(&review);
-    assert_eq!(review["heads"]["expected_project_seq"], 7);
-    assert_eq!(review["heads"]["expected_objective_seq"], 7);
-    let packet = &review["result"]["value"]["packet"];
-    let packet_id = packet["id"]
+    let packet = current_review_packet(root, &fixture.objective_id);
+    let packet_id = packet["review_packet"]["id"]
         .as_str()
-        .expect("Core review material contains a Packet id");
-    assert_eq!(packet["attempt"], fixture.attempt_id);
+        .expect("ReviewPacket projection contains an id");
+    assert_eq!(packet["review_packet"]["attempt"], fixture.attempt_id);
     assert_eq!(
-        packet["evidence_set"].as_array().map(Vec::len),
+        packet["review_packet"]["evidence_set"]
+            .as_array()
+            .map(Vec::len),
         Some(1),
         "Core materializes exactly the admitted Evidence universe"
     );
@@ -897,44 +929,23 @@ fn finish_public_mcp_achieved(
         }),
     );
 
-    let status = call_tool(
-        process,
-        first_rpc_id + 3,
-        "mobius_read",
-        json!({
-            "binding": {"project_root": root, "project_id": fixture.project_id},
-            "query": {"kind": "status", "objective_id": fixture.objective_id}
-        }),
-        root,
-    );
-    let status = assert_tool_success(&status);
-    assert_eq!(status["heads"]["expected_project_seq"], 8);
-    assert_eq!(status["heads"]["expected_objective_seq"], 8);
+    let status = objective_projection(root, &fixture.objective_id);
     assert_eq!(
-        status["result"]["value"]["objective_state"]["achieved"]["objective"],
+        status["objective_state"]["achieved"]["objective"],
         fixture.objective_id
     );
 
-    let audit = call_tool(
-        process,
-        first_rpc_id + 4,
-        "mobius_audit",
-        json!({
-            "binding": {"project_root": root, "project_id": fixture.project_id}
-        }),
-        root,
-    );
-    let audit = assert_tool_success(&audit);
+    let audit = readonly_audit(root, &fixture.project_id);
     assert_eq!(audit["status"], "healthy");
     assert_eq!(audit["project_seq"], 8);
     assert_eq!(audit["checked_objectives"], 1);
-    assert_eq!(audit["issues"], json!([]));
+    assert_eq!(audit["issues"]["items"], json!([]));
+    assert_eq!(audit["issues"]["complete"], true);
 }
 
-const NO_CORE_MCP_RULE: &str =
-    "Do not call any Mobius Core MCP method, including any of the six `mobius_*` tools.";
+const NO_CORE_MCP_RULE: &str = "Do not call any Mobius MCP tool.";
 const NO_MANAGED_STATE_RULE: &str = "Do not read or write `.mobius/` managed state.";
-const CORE_MCP_BOUNDARY_SIGNAL: &str = "Mobius Core MCP";
+const CORE_MCP_BOUNDARY_SIGNAL: &str = "Mobius MCP";
 const MANAGED_STATE_BOUNDARY_SIGNAL: &str = ".mobius/";
 
 fn full_verifier_delegation_task() -> Value {
@@ -1413,26 +1424,8 @@ fn clean_stdio_mcp_review_and_wait_branch_matrix_preserves_route_semantics() {
         );
         assert_eq!(decided["transition"], "decision", "wrong branch: {branch}");
 
-        let status = call_tool(
-            &mut process,
-            fixture.next_rpc_id + 1,
-            "mobius_read",
-            json!({
-                "binding": {
-                    "project_root": root,
-                    "project_id": fixture.attempting.project_id
-                },
-                "query": {
-                    "kind": "status",
-                    "objective_id": fixture.attempting.objective_id
-                }
-            }),
-            &root,
-        );
-        let status = assert_tool_success(&status);
-        assert_eq!(status["heads"]["expected_project_seq"], 8);
-        assert_eq!(status["heads"]["expected_objective_seq"], 8);
-        let navigation = &status["result"]["value"]["objective_state"]["navigating"]["navigation"];
+        let status = objective_projection(&root, &fixture.attempting.objective_id);
+        let navigation = &status["objective_state"]["navigating"]["navigation"];
 
         let final_seq = match branch {
             "retry" => {
@@ -1466,7 +1459,7 @@ fn clean_stdio_mcp_review_and_wait_branch_matrix_preserves_route_semantics() {
             }
             "review_remap" => {
                 assert_eq!(
-                    status["result"]["value"]["objective_state"]["mapping"]["reason"]["remap"],
+                    status["objective_state"]["mapping"]["reason"]["remap"],
                     "the Stage structure needs a replacement Map"
                 );
                 install_second_e2e_map(
@@ -1524,25 +1517,8 @@ fn clean_stdio_mcp_review_and_wait_branch_matrix_preserves_route_semantics() {
                 );
                 assert_eq!(checked["transition"], "check_wait");
 
-                let resumed = call_tool(
-                    &mut process,
-                    fixture.next_rpc_id + 3,
-                    "mobius_read",
-                    json!({
-                        "binding": {
-                            "project_root": root,
-                            "project_id": fixture.attempting.project_id
-                        },
-                        "query": {
-                            "kind": "status",
-                            "objective_id": fixture.attempting.objective_id
-                        }
-                    }),
-                    &root,
-                );
-                let resumed = assert_tool_success(&resumed);
-                assert_eq!(resumed["heads"]["expected_project_seq"], 9);
-                let objective_state = &resumed["result"]["value"]["objective_state"];
+                let resumed = objective_projection(&root, &fixture.attempting.objective_id);
+                let objective_state = &resumed["objective_state"];
                 match direction {
                     "stay" => {
                         assert_eq!(
@@ -1599,22 +1575,14 @@ fn clean_stdio_mcp_review_and_wait_branch_matrix_preserves_route_semantics() {
             _ => unreachable!(),
         };
 
-        let audit = call_tool(
-            &mut process,
-            fixture.next_rpc_id + 12,
-            "mobius_audit",
-            json!({
-                "binding": {
-                    "project_root": root,
-                    "project_id": fixture.attempting.project_id
-                }
-            }),
-            &root,
-        );
-        let audit = assert_tool_success(&audit);
+        let audit = readonly_audit(&root, &fixture.attempting.project_id);
         assert_eq!(audit["status"], "healthy", "wrong branch: {branch}");
         assert_eq!(audit["project_seq"], final_seq, "wrong branch: {branch}");
-        assert_eq!(audit["issues"], json!([]), "wrong branch: {branch}");
+        assert_eq!(
+            audit["issues"]["items"],
+            json!([]),
+            "wrong branch: {branch}"
+        );
         process.finish();
     }
 }
@@ -1709,21 +1677,9 @@ fn clean_stdio_mcp_delegated_composition_gates_full_result_then_main_reaches_ach
         assert_eq!(submit_calls, 0, "{case} reached the Core submit closure");
     }
 
-    let unchanged = call_tool(
-        &mut process,
-        fixture.next_rpc_id,
-        "mobius_read",
-        json!({
-            "binding": {"project_root": root, "project_id": fixture.project_id},
-            "query": {"kind": "status", "objective_id": fixture.objective_id}
-        }),
-        &root,
-    );
-    let unchanged = assert_tool_success(&unchanged);
-    assert_eq!(unchanged["heads"]["expected_project_seq"], 5);
-    assert_eq!(unchanged["heads"]["expected_objective_seq"], 5);
+    let unchanged = objective_projection(&root, &fixture.objective_id);
     assert_eq!(
-        unchanged["result"]["value"]["objective_state"]["navigating"]["navigation"]["attempting"]["attempt"],
+        unchanged["objective_state"]["navigating"]["navigation"]["attempting"]["attempt"],
         fixture.attempt_id
     );
 
@@ -1768,7 +1724,7 @@ fn clean_stdio_mcp_delegated_composition_gates_full_result_then_main_reaches_ach
 }
 
 #[test]
-fn real_stdio_session_initializes_lists_and_calls_core_read_tools() {
+fn real_stdio_session_lists_only_mutation_tools_and_rejects_removed_reads() {
     let workspace = Workspace::new();
     let launcher_workspace = Workspace::new();
     let root = workspace
@@ -1781,6 +1737,12 @@ fn real_stdio_session_initializes_lists_and_calls_core_read_tools() {
     let initialized = process.initialize();
     assert_eq!(initialized["result"]["protocolVersion"], PROTOCOL_VERSION);
     assert_eq!(initialized["result"]["serverInfo"]["name"], "mobius");
+    let instructions = initialized["result"]["instructions"]
+        .as_str()
+        .expect("server instructions");
+    assert!(instructions.contains("untrusted data"));
+    assert!(instructions.contains("SQLite"));
+    assert!(instructions.contains("read-only safe mode"));
     assert_eq!(
         initialized["result"]["capabilities"]["tools"]["listChanged"],
         false
@@ -1808,14 +1770,18 @@ fn real_stdio_session_initializes_lists_and_calls_core_read_tools() {
         names,
         [
             "mobius_project_init",
-            "mobius_read",
             "mobius_capture_artifact",
-            "mobius_read_artifact",
             "mobius_apply_transition",
             "mobius_audit"
         ]
     );
     assert!(tools.iter().all(|tool| tool["inputSchema"].is_object()));
+    assert!(tools.iter().all(|tool| tool["outputSchema"].is_object()));
+    assert!(tools.iter().all(|tool| {
+        tool["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("isError=true"))
+    }));
 
     let initialized_project = call_tool(
         &mut process,
@@ -1828,53 +1794,29 @@ fn real_stdio_session_initializes_lists_and_calls_core_read_tools() {
         .as_str()
         .expect("project_init must return a project id")
         .to_owned();
-    let binding = json!({"project_root": root_text, "project_id": project_id});
-
-    let read = call_tool(
-        &mut process,
-        4,
-        "mobius_read",
-        json!({
-            "binding": binding,
-            "query": {"kind": "status", "objective_id": null}
-        }),
-        &root,
-    );
-    let read = assert_tool_success(&read);
-    assert_eq!(read["heads"]["expected_project_seq"], 0);
-    assert_eq!(read["heads"]["expected_objective_seq"], 0);
-    assert_eq!(read["result"]["kind"], "status");
-    assert_eq!(read["result"]["value"]["objective_ids"], json!([]));
+    let removed_read = call_tool(&mut process, 4, "mobius_read", json!({}), &root);
+    assert_eq!(removed_read["error"]["code"], -32602);
+    assert_eq!(removed_read["error"]["message"], "unknown tool name");
 
     let audit = call_tool(
         &mut process,
         5,
         "mobius_audit",
-        json!({"binding": binding}),
-        &root,
-    );
-    let audit = assert_tool_success(&audit);
-    assert_eq!(audit["status"], "healthy");
-    assert_eq!(audit["project_seq"], 0);
-    assert_eq!(audit["checked_objectives"], 0);
-    assert_eq!(audit["issues"], json!([]));
-
-    let invalid_read = call_tool(
-        &mut process,
-        6,
-        "mobius_read",
         json!({
-            "binding": {"project_root": root_text, "project_id": "wrong-project"},
-            "query": {"kind": "status", "objective_id": null}
+            "binding": {"project_root": root_text, "project_id": project_id}
         }),
         &root,
     );
-    assert!(invalid_read.get("error").is_none());
-    assert_eq!(invalid_read["result"]["isError"], true);
+    assert_eq!(audit["result"]["isError"], true);
     assert_eq!(
-        invalid_read["result"]["structuredContent"]["schema"],
-        "mobius.error.v1"
+        audit["result"]["structuredContent"]["code"],
+        "maintenance_required"
     );
+    assert_eq!(readonly_audit(&root, &project_id)["status"], "healthy");
+
+    let removed_artifact_read =
+        call_tool(&mut process, 6, "mobius_read_artifact", json!({}), &root);
+    assert_eq!(removed_artifact_read["error"]["code"], -32602);
 
     let caller_packet = call_tool(
         &mut process,
@@ -2334,20 +2276,9 @@ fn official_thread_metadata_drives_only_best_effort_post_commit_reports() {
         Some("broken-thread"),
     );
     assert_eq!(assert_tool_success(&activated)["committed_project_seq"], 1);
-    let read = call_tool(
-        &mut process,
-        22,
-        "mobius_read",
-        json!({
-            "binding": {"project_root": root, "project_id": project_id},
-            "query": {"kind": "status", "objective_id": "objective-broken-view"}
-        }),
-        &root,
-    );
-    let read = assert_tool_success(&read);
-    assert_eq!(read["heads"]["expected_project_seq"], 1);
+    let read = objective_projection(&root, "objective-broken-view");
     assert_eq!(
-        read["result"]["value"]["objective_state"]["mapping"]["objective"],
+        read["objective_state"]["mapping"]["objective"],
         "objective-broken-view"
     );
     process.finish();
@@ -2481,17 +2412,11 @@ fn carry_completing_install_map_refreshes_all_existing_terminal_reports() {
     );
     assert_eq!(assert_tool_success(&selected)["committed_project_seq"], 4);
 
-    let context = call_tool(
-        &mut process,
-        7,
-        "mobius_read",
-        json!({
-            "binding": {"project_root": root, "project_id": project_id},
-            "query": {"kind": "current_context", "objective_id": objective_id}
-        }),
-        &root,
-    );
-    let context = assert_tool_success(&context)["result"]["value"]["context"].clone();
+    let route = projected_object(&root, objective_id, "route", route_id);
+    let context = json!({
+        "structural": route["route"]["structural_context"],
+        "dependency_proofs": {}
+    });
     let attempt_id = "attempt-carry-report-primary";
     let started = call_tool(
         &mut process,
@@ -2553,20 +2478,8 @@ fn carry_completing_install_map_refreshes_all_existing_terminal_reports() {
     );
     assert_eq!(assert_tool_success(&sealed)["committed_project_seq"], 7);
 
-    let material = call_tool(
-        &mut process,
-        11,
-        "mobius_read",
-        json!({
-            "binding": {"project_root": root, "project_id": project_id},
-            "query": {"kind": "review_material", "objective_id": objective_id}
-        }),
-        &root,
-    );
-    let packet_id = assert_tool_success(&material)["result"]["value"]["packet"]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let material = current_review_packet(&root, objective_id);
+    let packet_id = material["review_packet"]["id"].as_str().unwrap().to_owned();
     let accepted = call_tool(
         &mut process,
         12,
@@ -2662,21 +2575,10 @@ fn carry_completing_install_map_refreshes_all_existing_terminal_reports() {
     assert_eq!(generation_count(&run), 2);
     assert_eq!(generation_count(&second_run), 2);
 
-    let status = call_tool(
-        &mut process,
-        16,
-        "mobius_read",
-        json!({
-            "binding": {"project_root": root, "project_id": project_id},
-            "query": {"kind": "status", "objective_id": objective_id}
-        }),
-        &root,
-    );
-    assert_eq!(
-        assert_tool_success(&status)["result"]["value"]["objective_state"]["achieved"]["manifest"]
-            [primary_stage_id],
-        "decision-carry-report-primary"
-    );
+    let status = objective_projection(&root, objective_id);
+    let proof = &status["objective_state"]["achieved"]["manifest"];
+    assert_eq!(proof.as_object().map(serde_json::Map::len), Some(1));
+    assert_eq!(proof[primary_stage_id], "decision-carry-report-primary");
     process.finish();
 }
 

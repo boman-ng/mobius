@@ -1131,9 +1131,8 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use crate::application::service::{
-        CoreService, ProjectBinding, ProjectInitRequest, ReadQuery, ReadRequest,
-    };
+    use crate::application::service::{CoreService, ProjectInitRequest};
+    use rusqlite::Connection;
 
     use super::*;
 
@@ -1236,25 +1235,21 @@ mod tests {
         for checkpoint in checkpoints {
             let project = TestProject::new();
             let service = CoreService::new(vec![project.root.clone()]);
-            let project_id = service
+            service
                 .project_init(ProjectInitRequest {
                     project_root: project.root.clone(),
                     request_id: format!("report-crash-bootstrap-{checkpoint}"),
                 })
-                .unwrap()
-                .project_id;
-            let binding = ProjectBinding {
-                project_root: project.root.clone(),
-                project_id,
-            };
+                .unwrap();
             let read_heads = || {
-                service
-                    .read(ReadRequest {
-                        binding: binding.clone(),
-                        query: ReadQuery::Status { objective_id: None },
-                    })
+                Connection::open(project.root.join(".mobius/mobius.sqlite3"))
                     .unwrap()
-                    .heads
+                    .query_row(
+                        "SELECT project_seq FROM schema_meta WHERE singleton = 1",
+                        [],
+                        |row| row.get::<_, u64>(0),
+                    )
+                    .unwrap()
             };
             let heads_before = read_heads();
 
