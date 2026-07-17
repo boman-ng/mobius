@@ -227,6 +227,8 @@ fn common_envelopes_preserve_required_semantics() {
             "\"focus\"",
             "\"role_input\"",
             "\"output_format\"",
+            "\"result_budget\"",
+            "\"max_public_result_bytes\"",
             "\"done_when\"",
         ],
     );
@@ -250,6 +252,8 @@ fn common_envelopes_preserve_required_semantics() {
             "\"artifacts\"",
             "\"uncertainties\"",
             "\"blockers\"",
+            "\"overflow\"",
+            "\"omitted_items\"",
             "\"role_output\"",
             "\"authorization\"",
             "authorized | unauthorized | ambiguous",
@@ -281,6 +285,12 @@ fn common_envelopes_preserve_required_semantics() {
             "Keep all IDs local to this task.",
             "Never turn model count, votes, Runtime success, or recommendations into automatic acceptance.",
             "Keep the result advisory and candidate-only.",
+            "one finite positive integer",
+            "whole serialized public result",
+            "a single item does not bypass that ceiling",
+            "Never silently truncate correctness-critical results.",
+            "one de-duplicated synthesis",
+            "shared finite total result budget",
         ],
     );
 }

@@ -68,7 +68,10 @@ Provide all correctness-critical context inside the task. Use natural language, 
   "output_format": {
     "representation": "structured_markdown | json",
     "template": "the complete common result plus the selected role output",
-    "constraints": ["evidence granularity, length, locator, and redaction requirements"]
+    "constraints": ["evidence granularity, length, locator, and redaction requirements"],
+    "result_budget": {
+      "max_public_result_bytes": 8192
+    }
   },
   "done_when": [
     {"id": "D1", "condition": "an observable return condition", "evidence_required": []}
@@ -84,6 +87,7 @@ Apply these construction rules:
 - Use only main-agent-verified items in `confirmed_facts`; put unverified premises in `assumptions_to_check`.
 - Fill `role_input` with the selected role template.
 - Inline the complete public result, selected `role_output`, and, when effects are possible, the effect item below. Never send a reference the worker cannot access.
+- Set `max_public_result_bytes` to one finite positive integer sized for the task. It bounds the whole serialized public result, including the selected `role_output`, inventories, and locators. Keep raw logs and large details in authorized artifacts or native Runtime items and return only checkable locators.
 - State return conditions for success, partial completion, and a clear blocker. Do not let the worker redefine completion.
 
 ## Require one public result
@@ -163,11 +167,23 @@ Require exactly one public result envelope and exactly one selected `role_output
   "blockers": [
     {"subject": "blocking condition", "reason": "why", "needed": "what would unblock it"}
   ],
+  "overflow": {
+    "omitted_items": 0,
+    "artifact_ids": [],
+    "reason": "none | result_budget"
+  },
   "role_output": {}
 }
 ```
 
 Require every objective, assumption, and done condition to receive a result, including unknown and not-evaluated outcomes. Keep `effects` and `artifacts` as the only authoritative inventories; role output may reference their IDs but must not duplicate them.
+
+Return one de-duplicated synthesis. Each fact, finding, and locator appears once and may be referenced
+by ID elsewhere. Record optional excess in `overflow`. The whole serialized envelope must remain
+within `max_public_result_bytes`; a single item does not bypass that ceiling.
+Never silently truncate correctness-critical results. If a critical result cannot fit and no
+authorized stable locator is available, return `partial` or `blocked` instead of a success-shaped
+summary.
 
 Keep all IDs local to this task. The top-level `status` describes whether execution returned normally; it does not assert that every objective succeeded or that anything was accepted later.
 
@@ -189,6 +205,7 @@ Use follow-up only to clarify or complete the same envelope, baseline, and autho
 
 - Run tasks concurrently only when inputs, work scopes, and possible effects are independent.
 - Run independent read-only investigations and independent Judge reviews concurrently when useful.
+- Give fanout a shared finite total result budget, divide it into child budgets, and ask each Judge for a distinct question, failure model, or counterargument. Produce one de-duplicated synthesis after inspection.
 - Keep multiple Judge results independent. Never turn model count, votes, Runtime success, or recommendations into automatic acceptance.
 - Serialize Drivers whose modifications overlap or compete for the same external object.
 - Start a Verifier after the relevant effects have occurred and stabilized.
