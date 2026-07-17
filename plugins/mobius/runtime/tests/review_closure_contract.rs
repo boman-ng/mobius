@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -13,11 +14,15 @@ const REVIEW_REFERENCE: &str = include_str!("../../skills/mobius-loop/references
 
 fn sha256_text(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    let hex = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sha256:{hex}")
+    format!("sha256:{}", lower_hex(&digest))
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut result, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    result
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,11 +155,7 @@ fn verified_snapshot_range(
         }
         let actual_digest = {
             let digest = hasher.finalize();
-            let hex = digest
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            format!("sha256:{hex}")
+            format!("sha256:{}", lower_hex(&digest))
         };
         if actual_size != expected_size || actual_digest != digest {
             return Err("snapshot digest or size mismatch".to_owned());
