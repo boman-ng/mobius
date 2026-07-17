@@ -140,5 +140,6 @@ changed experimental MCP metadata shape requires this gate again.
 - Confirm `plugins/mobius/.codex-plugin/plugin.json`, `.mcp.json`, and `hooks/hooks.json` still
   resolve to the same installed `bin/mobius`.
 - Run an independent cross-review against every blueprint requirement and recorded command result.
-- Confirm `dev/v1-implementation-status.md` records no open Phase 2–4 engineering decision and
-  states any accepted residual performance or cooperative-threat-model risk explicitly.
+- Confirm the three authoritative `dev/` blueprints contain no unresolved P0 decision for the
+  release scope, and state accepted residual performance or cooperative-threat-model risk in the
+  release review and notes.

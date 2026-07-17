@@ -87,4 +87,5 @@ shape blocks release until this adapter and its tests are revalidated.
   exercises the installed copy through the public MCP write wire and read-only SQLite observation.
 
 These decisions establish the package and host-admission boundary. Phase completion still depends
-on the phase evidence and independent P0 review recorded in `dev/v1-implementation-status.md`.
+on the executable gates in `docs/release-checklist.md` and an independent P0 review against the
+three authoritative `dev/` blueprints.

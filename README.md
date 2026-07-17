@@ -47,9 +47,9 @@ The active tree contains one Cargo package with one `mobius` binary target, the
 SQLite and artifact stores, the Core service, public stdio MCP, read-only operational CLI modes,
 context-dark reports, and narrow hooks. Direct and delegated Composition loops are tested through
 the real MCP process with read-only SQLite observation; the delegated lane keeps worker output
-candidate-only and lets only main construct typed Core input. Detailed evidence and the
-supported-host boundary are recorded in
-`dev/v1-implementation-status.md`.
+candidate-only and lets only main construct typed Core input. The authoritative blueprints define
+the implementation boundary; `docs/release-checklist.md`, CI, and each GitHub release record the
+verification and supported-host boundary.
 
 `mobius-copilot` exclusively manages human-authorized Objective activation, revision,
 abandonment, and the initial or specification-revision Map those actions require. It resumes an
