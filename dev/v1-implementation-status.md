@@ -164,7 +164,7 @@ admitted single-snapshot Wait enumeration, and head rechecks. Tracked fixtures e
 multi-level Review DAG and the exact Wait reference SQL, including denial and truncation.
 
 The candidate passes format, locked all-target check, Clippy with warnings denied, and all
-165 Rust tests. All three Skill validators, plugin validation, the source contract, final assembled
+166 Rust tests. All three Skill validators, plugin validation, the source contract, final assembled
 bundle gate, and isolated real Codex `0.144.5` install gate pass. The installed direct and delegated
 loops use four-tool MCP writes, canonical read-only SQLite observations from an ordinary external
 cwd, exact Core-owned review material, `Achieved`, and healthy CLI audit.
