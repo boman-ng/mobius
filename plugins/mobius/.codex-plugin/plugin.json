@@ -17,7 +17,6 @@
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Mobius",
     "shortDescription": "Auditable local Objective loops.",

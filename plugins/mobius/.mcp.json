@@ -1,9 +1,11 @@
 {
-  "mobius": {
-    "command": "./bin/mobius",
-    "args": [
-      "mcp"
-    ],
-    "cwd": "."
+  "mcpServers": {
+    "mobius": {
+      "command": "./bin/mobius",
+      "args": [
+        "mcp"
+      ],
+      "cwd": "."
+    }
   }
 }

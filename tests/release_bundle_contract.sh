@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly MINIMUM_CODEX_CLI_VERSION=0.143.0
+readonly MINIMUM_SQLITE_VERSION=3.40.1
 
 fail() {
   echo "release bundle contract: $*" >&2
@@ -40,6 +41,28 @@ stable_semver_at_least() {
   ))
 }
 
+supported_sqlite_binary() {
+  local candidate canonical version actual
+
+  candidate=$(command -v sqlite3 || true)
+  [ -n "$candidate" ] \
+    || fail "release validation requires sqlite3 >= $MINIMUM_SQLITE_VERSION"
+  case $candidate in
+    /*) ;;
+    *) fail "sqlite3 must resolve to an absolute path: $candidate" ;;
+  esac
+  canonical=$(realpath -- "$candidate") \
+    || fail "could not canonicalize sqlite3: $candidate"
+  [ -f "$canonical" ] && [ -x "$canonical" ] && [ "$(basename -- "$canonical")" = sqlite3 ] \
+    || fail "sqlite3 must be one canonical executable named sqlite3: $canonical"
+  version=$("$canonical" --version) \
+    || fail "could not read sqlite3 version: $canonical"
+  actual=${version%% *}
+  stable_semver_at_least "$actual" "$MINIMUM_SQLITE_VERSION" \
+    || fail "release validation requires sqlite3 >= $MINIMUM_SQLITE_VERSION; found $actual"
+  printf '%s\n' "$canonical"
+}
+
 validate_codex_version_policy() {
   local supported unsupported
 
@@ -69,14 +92,15 @@ validate_config() {
     (.version | type == "string" and length > 0) and
     .skills == "./skills/" and
     .mcpServers == "./.mcp.json" and
-    .hooks == "./hooks/hooks.json"
+    (has("hooks") | not)
   ' "$manifest" >/dev/null || fail "manifest component paths are not canonical"
 
   jq -e '
-    (keys == ["mobius"]) and
-    .mobius.command == "./bin/mobius" and
-    .mobius.args == ["mcp"] and
-    .mobius.cwd == "."
+    (keys == ["mcpServers"]) and
+    (.mcpServers | keys == ["mobius"]) and
+    .mcpServers.mobius.command == "./bin/mobius" and
+    .mcpServers.mobius.args == ["mcp"] and
+    .mcpServers.mobius.cwd == "."
   ' "$mcp" >/dev/null || fail "MCP config must expose one server through ./bin/mobius"
 
   jq -e '
@@ -240,6 +264,7 @@ validate_bundle_shape() {
 smoke_installed_plugin() {
   installed=$1
   isolated_root=$2
+  sqlite_binary=${3:-$(supported_sqlite_binary)}
   manifest_version=$(jq -r '.version' "$installed/.codex-plugin/plugin.json")
   workspace="$isolated_root/workspace with spaces"
   bound_container="$isolated_root/bound-container"
@@ -251,9 +276,10 @@ smoke_installed_plugin() {
     cd "$workspace"
     env -i HOME="$isolated_root/home" PATH=/nonexistent "$installed/bin/mobius" --help
   ) || fail "cache-copied binary did not start in an empty environment"
-  for mode in mcp read audit doctor report hook; do
+  for mode in mcp audit doctor report hook; do
     grep -q "mobius $mode" <<<"$help_output" || fail "help omits mode: $mode"
   done
+  ! grep -q 'mobius read' <<<"$help_output" || fail "help still exposes the removed read mode"
 
   initialize_request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}'
   initialized_notification='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
@@ -395,10 +421,12 @@ smoke_installed_plugin() {
     "project A hook cwd with project B tool workdir" \
     exec_command \
     "$(jq -nc --arg workdir "$project_b" '{cmd:"rm -rf .",workdir:$workdir}')"
+  project_b_database=$(realpath -- "$project_b/.mobius/mobius.sqlite3")
+  sqlite_read_command="'$sqlite_binary' --safe --readonly --batch --bail --init /dev/null --line '$project_b_database' 'PRAGMA query_only=ON; BEGIN; SELECT project_seq FROM schema_meta WHERE singleton = 1 LIMIT 1; COMMIT;'"
   expect_hook_allow \
-    "an unbound deterministic read of project B state" \
+    "the exact supported read-only SQLite command for project B" \
     exec_command \
-    "$(jq -nc --arg cmd "file '$project_b/.mobius/mobius.sqlite3'" '{cmd:$cmd}')" \
+    "$(jq -nc --arg cmd "$sqlite_read_command" '{cmd:$cmd}')" \
     "$ordinary_cwd"
 
   connector_newline=$(jq -nc --arg cmd "cd '$project_b' &&
@@ -447,6 +475,7 @@ validate_bundle() {
 validate_codex_install() {
   bundle_root=$1
   validate_bundle_shape "$bundle_root"
+  host_sqlite_binary=$(supported_sqlite_binary)
 
   codex_binary=$(command -v codex || true)
   [ -n "$codex_binary" ] || fail "codex-install mode requires the Codex CLI"
@@ -489,7 +518,8 @@ validate_codex_install() {
     *) fail "Codex installed outside the isolated cache: $installed" ;;
   esac
   validate_config "$installed"
-  smoke_installed_plugin "$installed" "$install_root"
+  smoke_installed_plugin "$installed" "$install_root" "$host_sqlite_binary"
+  sqlite_binary=$host_sqlite_binary
 
   effective_mcp=$("$codex_binary" mcp list --json) \
     || fail "Codex could not resolve the installed plugin MCP config"
@@ -580,20 +610,28 @@ validate_codex_install() {
       || fail "installed MCP returned an invalid $expected_transition commit: $response"
   }
 
-  mcp_read_objective() {
+  sqlite_read() {
+    local query=$1
+    "$sqlite_binary" \
+      --safe --readonly --batch --bail --init /dev/null --line \
+      "$database" \
+      "PRAGMA query_only=ON; BEGIN; $query COMMIT;" \
+      || fail "installed read-only SQLite observation failed"
+  }
+
+  sqlite_value() {
+    local query=$1
+    local output values
+    output=$(sqlite_read "$query")
+    values=$(sed -n 's/^[[:space:]]*value[=:][[:space:]]*//p' <<<"$output")
+    [ "$(grep -c '^' <<<"$values")" = "1" ] && [ -n "$values" ] \
+      || fail "installed read-only SQLite observation returned an unexpected row shape: $output"
+    printf '%s\n' "$values"
+  }
+
+  objective_snapshot() {
     local objective=$1
-    local kind=$2
-    local arguments
-    arguments=$(jq -nc \
-      --arg root "$workspace" \
-      --arg project_id "$project_id" \
-      --arg objective "$objective" \
-      --arg kind "$kind" '
-      {
-        binding: {project_root: $root, project_id: $project_id},
-        query: {kind: $kind, objective_id: $objective}
-      }')
-    mcp_wire_call mobius_read "$arguments"
+    sqlite_value "SELECT json_object('project_seq', project_seq, 'objective_seq', objective_seq, 'is_active', is_active, 'projection', json(CAST(projection_bytes AS TEXT))) AS value FROM objective_projection WHERE objective_id = '$objective' LIMIT 2;"
   }
 
   run_installed_loop() {
@@ -607,8 +645,8 @@ validate_codex_install() {
     local attempt="attempt-$objective"
     local evidence="evidence-$objective"
     local decision="decision-$objective"
-    local spec contract map command read_response context packet packet_id
-    local observation provenance audit_arguments audit_response status_response
+    local spec contract map command context map_projection packet packet_id objective_state
+    local observation provenance audit_response achieved_snapshot
 
     spec=$(jq -nc \
       --arg objective "$objective" \
@@ -621,7 +659,7 @@ validate_codex_install() {
           ($criterion): {
             id: $criterion,
             statement: "the installed full loop is observable",
-            verification_rule: "inspect the frozen observation through public MCP reads",
+            verification_rule: "inspect the frozen observation through read-only SQLite",
             scope: "local"
           }
         },
@@ -699,18 +737,18 @@ validate_codex_install() {
     mcp_apply_transition \
       "$objective" "$((base_project_seq + 1))" 1 "$lane-install-map" install_map "$command"
 
-    read_response=$(mcp_read_objective "$objective" current_context)
+    map_projection=$(sqlite_value "SELECT CAST(projection_bytes AS TEXT) AS value FROM object_projection WHERE objective_id = '$objective' AND object_kind = 'map_revision' AND json_extract(CAST(projection_bytes AS TEXT), '$.map_revision.revision') = 1 ORDER BY object_id LIMIT 2;")
     context=$(jq -ce \
-      --arg stage "$stage" \
-      --argjson project_seq "$((base_project_seq + 2))" '
-      select(.result.structuredContent.heads == {
-        expected_project_seq: $project_seq,
-        expected_objective_seq: 2
-      }) |
-      .result.structuredContent.result |
-      select(.kind == "current_context" and .value.stage == $stage) |
-      .value.context
-    ' <<<"$read_response") || fail "installed MCP returned no current AcceptanceContext"
+      --arg stage "$stage" '
+      .map_revision |
+      select(.dependencies == []) |
+      .contracts[$stage] as $contract |
+      select($contract != null) |
+      {
+        structural: {contract: $contract, dependencies: {}},
+        dependency_proofs: {}
+      }
+    ' <<<"$map_projection") || fail "read-only SQLite returned no current AcceptanceContext source"
 
     command=$(jq -nc \
       --arg route "$route" \
@@ -801,22 +839,31 @@ validate_codex_install() {
     mcp_apply_transition \
       "$objective" "$((base_project_seq + 6))" 6 "$lane-seal-attempt" seal_attempt "$command"
 
-    read_response=$(mcp_read_objective "$objective" review_material)
-    packet=$(jq -ce \
+    objective_state=$(objective_snapshot "$objective")
+    packet_id=$(jq -er \
+      --argjson project_seq "$((base_project_seq + 7))" '
+      select(
+        .project_seq == $project_seq and
+        .objective_seq == 7 and
+        .is_active == 1
+      ) |
+      .projection.objective_state.navigating.navigation.reviewing.packet
+    ' <<<"$objective_state") || fail "read-only SQLite omitted the current Packet identity"
+    packet=$(sqlite_value "SELECT CAST(projection_bytes AS TEXT) AS value FROM object_projection WHERE objective_id = '$objective' AND object_kind = 'review_packet' AND json_extract(CAST(projection_bytes AS TEXT), '$.review_packet.id') = '$packet_id' ORDER BY object_id LIMIT 2;")
+    jq -e \
       --arg attempt "$attempt" \
       --arg evidence "$evidence" \
-      --argjson project_seq "$((base_project_seq + 7))" '
-      select(.result.structuredContent.heads == {
-        expected_project_seq: $project_seq,
-        expected_objective_seq: 7
-      }) |
-      .result.structuredContent.result |
-      select(.kind == "review_material") |
-      .value.packet |
-      select(.attempt == $attempt and .evidence_set == [$evidence] and .termination == "submitted")
-    ' <<<"$read_response") || fail "installed MCP returned invalid Core-materialized review material"
-    packet_id=$(jq -er '.id' <<<"$packet") \
-      || fail "installed MCP review material omitted the Packet identity"
+      --arg packet "$packet_id" \
+      --argjson context "$context" '
+      .review_packet |
+      select(
+        .id == $packet and
+        .attempt == $attempt and
+        .termination == "submitted" and
+        .context == $context and
+        .evidence_set == [$evidence]
+      )
+    ' <<<"$packet" >/dev/null || fail "read-only SQLite returned invalid Core review material"
 
     command=$(jq -nc \
       --arg decision "$decision" \
@@ -836,32 +883,30 @@ validate_codex_install() {
     mcp_apply_transition \
       "$objective" "$((base_project_seq + 7))" 7 "$lane-accept" decision "$command"
 
-    status_response=$(mcp_read_objective "$objective" status)
+    achieved_snapshot=$(objective_snapshot "$objective")
     jq -e \
       --arg objective "$objective" \
       --arg stage "$stage" \
       --arg decision "$decision" \
       --argjson project_seq "$((base_project_seq + 8))" '
-      .result.structuredContent.heads == {
-        expected_project_seq: $project_seq,
-        expected_objective_seq: 8
-      } and
-      .result.structuredContent.result.kind == "status" and
-      .result.structuredContent.result.value.active_objective == null and
-      .result.structuredContent.result.value.objective_state.achieved.objective == $objective and
-      .result.structuredContent.result.value.objective_state.achieved.manifest[$stage] == $decision
-    ' <<<"$status_response" >/dev/null \
+      .project_seq == $project_seq and
+      .objective_seq == 8 and
+      .is_active == 0 and
+      .projection.objective_state.achieved.objective == $objective and
+      .projection.objective_state.achieved.manifest == {($stage): $decision}
+    ' <<<"$achieved_snapshot" >/dev/null \
       || fail "installed $lane loop did not reach a fresh Achieved state"
 
-    audit_arguments=$(jq -nc \
-      --arg root "$workspace" \
-      --arg project_id "$project_id" \
-      '{binding:{project_root:$root,project_id:$project_id}}')
-    audit_response=$(mcp_wire_call mobius_audit "$audit_arguments")
+    audit_response=$(
+      cd "$workspace"
+      env -i HOME="$HOME" PATH=/nonexistent \
+        "$installed/bin/mobius" audit "$project_id"
+    ) || fail "installed $lane loop could not run the read-only audit CLI"
     jq -e --argjson project_seq "$((base_project_seq + 8))" '
-      .result.structuredContent.status == "healthy" and
-      .result.structuredContent.project_seq == $project_seq and
-      .result.structuredContent.issues == []
+      .status == "healthy" and
+      .project_seq == $project_seq and
+      .issues.complete == true and
+      .issues.items == []
     ' <<<"$audit_response" >/dev/null \
       || fail "installed $lane loop did not finish with a healthy audit"
   }
@@ -873,18 +918,13 @@ validate_codex_install() {
   project_id=$(jq -er '.result.structuredContent.project_id' <<<"$init_response") \
     || fail "installed MCP project_init returned no project identity"
 
-  read_arguments=$(jq -nc \
-    --arg root "$workspace" \
-    --arg project_id "$project_id" \
-    '{binding:{project_root:$root,project_id:$project_id},query:{kind:"status",objective_id:null}}')
-  read_response=$(mcp_wire_call mobius_read "$read_arguments")
-  jq -e '
-    .result.structuredContent.heads == {
-      "expected_objective_seq": 0,
-      "expected_project_seq": 0
-    } and
-    .result.structuredContent.result.value.objective_ids == []
-  ' <<<"$read_response" >/dev/null || fail "installed MCP read returned unexpected state"
+  database=$(realpath -- "$workspace/.mobius/mobius.sqlite3")
+  initial_state=$(sqlite_value "SELECT json_object('project_id', project_id, 'project_seq', project_seq, 'objective_count', (SELECT count(*) FROM objective_streams)) AS value FROM schema_meta WHERE singleton = 1 LIMIT 1;")
+  jq -e --arg project_id "$project_id" '
+    .project_id == $project_id and
+    .project_seq == 0 and
+    .objective_count == 0
+  ' <<<"$initial_state" >/dev/null || fail "read-only SQLite returned unexpected initial state"
 
   run_installed_loop direct release-direct 0 ''
 
