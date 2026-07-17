@@ -2358,6 +2358,13 @@ fn accepted_objective_interactions_write_one_deletable_route_design_summary() {
         interaction_path.file_name().and_then(|name| name.to_str()),
         Some("interaction.md")
     );
+    assert_eq!(
+        interaction_path
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str()),
+        Some("revision-1")
+    );
     let activated_markdown = fs::read_to_string(&interaction_path).unwrap();
     assert!(activated_markdown.contains("- Objective: objective-copilot-interaction"));
     assert!(activated_markdown.contains("- Revision: 1"));
@@ -2440,7 +2447,14 @@ fn accepted_objective_interactions_write_one_deletable_route_design_summary() {
             .as_str()
             .unwrap(),
     );
-    assert_eq!(revised_path, interaction_path);
+    assert_ne!(revised_path, interaction_path);
+    assert_eq!(
+        revised_path
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str()),
+        Some("revision-2")
+    );
     let revised_markdown = fs::read_to_string(&revised_path).unwrap();
     assert!(revised_markdown.contains("- Revision: 2"));
     assert!(revised_markdown.contains("- Action: revise"));
@@ -2460,9 +2474,10 @@ fn accepted_objective_interactions_write_one_deletable_route_design_summary() {
     let stale_value = assert_tool_success(&stale_replay);
     assert_eq!(core_receipt(stale_value), core_receipt(&activated_value));
     assert!(stale_value.get("interaction_path").is_none());
+    assert_eq!(fs::read_to_string(&revised_path).unwrap(), revised_markdown);
     assert_eq!(
         fs::read_to_string(&interaction_path).unwrap(),
-        revised_markdown
+        replayed_markdown
     );
 
     let reason = "interaction is forbidden on abandonment";
@@ -2497,13 +2512,12 @@ fn accepted_objective_interactions_write_one_deletable_route_design_summary() {
         forbidden["result"]["structuredContent"]["code"],
         "invalid_tool_input"
     );
-    assert_eq!(
-        fs::read_to_string(&interaction_path).unwrap(),
-        revised_markdown
-    );
+    assert_eq!(fs::read_to_string(&revised_path).unwrap(), revised_markdown);
 
     fs::remove_file(&revised_path).unwrap();
+    fs::remove_file(&interaction_path).unwrap();
     assert!(!revised_path.exists());
+    assert!(!interaction_path.exists());
     let audit = readonly_audit(&root, &project_id);
     assert_eq!(audit["status"], "healthy");
     assert_eq!(audit["project_seq"], 2);

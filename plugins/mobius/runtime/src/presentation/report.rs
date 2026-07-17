@@ -194,8 +194,8 @@ impl ReportRenderer {
         Ok(renderer)
     }
 
-    /// Atomically replaces one session-local interaction summary. The file is presentation-only
-    /// and is never read by this renderer or Core.
+    /// Atomically replaces one session-and-revision-local interaction summary. The file is
+    /// presentation-only and is never read by this renderer or Core.
     pub(crate) fn write_interaction(
         &self,
         scope: &ReportScope,
@@ -207,18 +207,20 @@ impl ReportRenderer {
         self.validate_root()?;
         let session = self.session_path(scope)?;
         let interactions = session.join(INTERACTIONS_DIRECTORY);
-        let interaction = interactions.join(format!(
+        let objective_interactions = interactions.join(format!(
             "{}--{}",
             encode_component(&scope.slug)?,
             objective_id_component(objective)?
         ));
-        ensure_below(&self.views, &interaction)?;
+        let revision_interaction = objective_interactions.join(format!("revision-{revision}"));
+        ensure_below(&self.views, &revision_interaction)?;
 
         create_or_verify_directory(&session)?;
         create_or_verify_directory(&interactions)?;
-        create_or_verify_directory(&interaction)?;
+        create_or_verify_directory(&objective_interactions)?;
+        create_or_verify_directory(&revision_interaction)?;
 
-        let path = interaction.join(INTERACTION_FILE);
+        let path = revision_interaction.join(INTERACTION_FILE);
         write_atomic_text(
             &path,
             &render_interaction(objective, revision, action, summary),
@@ -1811,8 +1813,9 @@ mod tests {
         let interaction_path = interaction.to_string_lossy();
         assert!(interaction_path.contains("session%2F%2E%2E%2Fone"));
         assert!(interaction_path.contains("objective%20%2F%20safety--"));
+        assert!(interaction_path.contains("/revision-3/interaction.md"));
         assert!(!interaction_path.contains("/../"));
-        let markdown = fs::read_to_string(interaction).unwrap();
+        let markdown = fs::read_to_string(&interaction).unwrap();
         for section in [
             "# Mobius Copilot Interaction",
             "- Objective: objective/../interaction",
@@ -1826,6 +1829,46 @@ mod tests {
         ] {
             assert!(markdown.contains(section), "interaction omitted {section}");
         }
+
+        let newer = renderer
+            .write_interaction(
+                &scope(),
+                &ObjectiveId::new("objective/../interaction"),
+                4,
+                InteractionAction::Revise,
+                &InteractionSummary {
+                    interpreted_intent: "newer intent".to_owned(),
+                    confirmed_boundaries: "boundaries".to_owned(),
+                    verified_facts: "facts".to_owned(),
+                    challenges_and_resolutions: "challenges".to_owned(),
+                    route_notes: "notes".to_owned(),
+                },
+            )
+            .unwrap();
+        let newer_markdown = fs::read_to_string(&newer).unwrap();
+        let delayed_older = renderer
+            .write_interaction(
+                &scope(),
+                &ObjectiveId::new("objective/../interaction"),
+                3,
+                InteractionAction::Revise,
+                &InteractionSummary {
+                    interpreted_intent: "delayed older intent".to_owned(),
+                    confirmed_boundaries: "boundaries".to_owned(),
+                    verified_facts: "facts".to_owned(),
+                    challenges_and_resolutions: "challenges".to_owned(),
+                    route_notes: "notes".to_owned(),
+                },
+            )
+            .unwrap();
+        assert_eq!(delayed_older, interaction);
+        assert_ne!(newer, interaction);
+        assert_eq!(fs::read_to_string(newer).unwrap(), newer_markdown);
+        assert!(
+            fs::read_to_string(delayed_older)
+                .unwrap()
+                .contains("delayed older intent")
+        );
     }
 
     #[test]
