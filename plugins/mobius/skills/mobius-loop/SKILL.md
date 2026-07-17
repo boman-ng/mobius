@@ -5,8 +5,9 @@ description: Continue one explicitly selected Mobius Objective through work, Evi
 
 # Mobius Loop
 
-Run one Objective from live facts. Let the main agent choose work, interpret candidates, construct
-Evidence and Judgment, and submit every mutation. Core owns guards and durable state.
+Run one Objective from live facts. Let the main agent design every Route, choose work, interpret
+candidates, construct Evidence and Judgment, and submit every mutation. Core owns guards and
+durable state.
 
 ## Activate only on explicit intent
 
@@ -21,7 +22,8 @@ Use exactly four MCP tools, only when writing:
 - `mobius_audit` — explicit `rebuild_projection` or `artifact_gc` maintenance only
 
 Read-only audit uses `mobius audit <project-id>`. Reports and CSV files are presentation, never
-Evidence, Judgment, proof, or completion input. Only the main agent may submit a Mobius write.
+Evidence, Judgment, proof, or completion input. The narrow `interaction.md` Route-design exception
+is defined below. Only the main agent may submit a Mobius write.
 
 ## Read state directly
 
@@ -88,6 +90,18 @@ Repeat until terminal or honestly blocked:
 Keep submissions serial. Core materializes the ReviewPacket when sealing. For `Mapping`, install a
 replacement Map here only when the reason is `Remap` or `WaitRevealedDrift`; hand `Initial` and
 `SpecRevised` to `$mobius-copilot`. Hand activation, revision, and abandonment there as well.
+
+## Design every Route
+
+All initial, added, and replacement Routes are designed by this main agent for the current Stage.
+Human implementation suggestions and prior Route Notes are advisory inputs: verify relevant facts,
+resolve them against the ObjectiveSpec, Map, and Structural Context, and choose the Route
+independently. Do not ask the human to assume Route-design responsibility.
+
+Only while preparing an `AddRoute` for a current `SeekingRoute` Stage, read
+[`references/interaction-read.md`](references/interaction-read.md). This covers the first Route
+after Initial/SpecRevised Map installation and every later added or replacement Route. Do not load
+or scan interaction summaries in other states.
 
 ## Inspect exact review material
 
