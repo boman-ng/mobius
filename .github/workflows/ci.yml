@@ -81,7 +81,8 @@ jobs:
         id: archive
         run: |
           archive="$RUNNER_TEMP/${{ steps.bundle.outputs.name }}.tar.gz"
-          tar -C "$(dirname "${{ steps.bundle.outputs.root }}")" \
+          tar --owner=0 --group=0 --numeric-owner \
+            -C "$(dirname "${{ steps.bundle.outputs.root }}")" \
             -czf "$archive" \
             "$(basename "${{ steps.bundle.outputs.root }}")"
           (
