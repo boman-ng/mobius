@@ -85,8 +85,9 @@ does not bundle or download one.
 
 The first and only configured target is `x86_64-unknown-linux-gnu`. Its assembled marketplace root
 contains the plugin at `plugins/mobius/` and exactly one executable at
-`plugins/mobius/bin/mobius`. The manifest selects the MCP and hook configs, and both configs invoke
-that same executable through paths relative to the installed plugin root.
+`plugins/mobius/bin/mobius`. The manifest selects the MCP config; Codex discovers
+`hooks/hooks.json` by convention. Both configs invoke the same executable through paths relative to
+the installed plugin root.
 The installed bundle excludes Rust source, development tests, Python, a SQLite CLI, launchers,
 downloaders, and helper executables. The host SQLite prerequisite is deliberately external.
 
