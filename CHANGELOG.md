@@ -2,6 +2,17 @@
 
 All notable changes to Mobius are documented here.
 
+## 1.2.1 - 2026-07-18
+
+- Give Copilot and Loop one explicit Agent cockpit, live-state router, submission fence, and
+  deterministic re-entry path after errors, interruptions, or context compaction.
+- Keep ordinary planning outside Mobius, while making activation and revision use one complete
+  outer request with the five-field presentation-only interaction summary.
+- Derive transition wrapper recovery guidance from the executable field table, reject unchanged
+  malformed retries, and admit managed SQLite reads only through canonical shell-word encoding.
+- Make Formal Review closure mechanically identity- and integrity-complete, and trigger optional
+  Subagent verification only when bounded value, authority, and freshness gates pass.
+
 ## 1.2.0 - 2026-07-17
 
 - Add expert-led, one-question-at-a-time Objective elicitation that challenges assumptions,
