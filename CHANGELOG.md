@@ -2,6 +2,15 @@
 
 All notable changes to Mobius are documented here.
 
+## 1.2.2 - 2026-07-18
+
+- Resolve the host SQLite executable through standalone PATH, canonicalization, and version probes
+  so Agents use the supported binary instead of guessing a system path.
+- Admit canonical safe read-only SQLite commands from their static shape and project binding
+  without executing the host CLI inside Hook admission.
+- Close bound-project `find` execution, output, and unsafe-pipeline mutation paths while preserving
+  ordinary-scope effects and read-only consumers.
+
 ## 1.2.1 - 2026-07-18
 
 - Give Copilot and Loop one explicit Agent cockpit, live-state router, submission fence, and
