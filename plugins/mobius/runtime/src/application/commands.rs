@@ -77,8 +77,8 @@ impl MutationCommand {
     }
 }
 
-/// The exact required fields of each externally tagged command payload. The MCP schema and
-/// `next_actions` read model share this table so guidance cannot drift from the accepted wire.
+/// The exact required fields of each externally tagged command payload. The MCP schema and tool
+/// guidance share this table so neither can drift from the accepted wire.
 pub(crate) const fn required_input_fields(kind: TransitionKind) -> &'static [&'static str] {
     match kind {
         TransitionKind::ActivateObjective | TransitionKind::ReviseObjective => {
