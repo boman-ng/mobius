@@ -510,8 +510,9 @@ Replay 只读取 Trail，不访问 host、Runtime、artifact source 或外部 re
 Agent read 只有一个正常路径：系统提供的 canonical absolute sqlite3，版本至少 3.40.1，并使用固定参数
 --safe --readonly --batch --bail --init /dev/null --line、canonical absolute database path 和一个 literal SQL
 argument。SQL 必须先设置 PRAGMA query_only=ON，在 BEGIN/COMMIT snapshot 内执行 SELECT。Hook 每次对同一
-literal executable 执行 --version 探测；bare name、PATH/alias/function、wrapper、变量、相对路径、不同参数、
-交互模式和 managed redirection 均不属于支持路径。
+literal command 只验证静态 shape 与 canonical binding，不执行 host CLI；Agent host card 通过独立的
+`type -P`、`realpath` 与 `--version` probe 解析并验证 executable。bare name、PATH/alias/function、wrapper、
+变量、相对路径、不同参数、交互模式和 managed redirection 均不属于支持路径。
 
 动态 typed identity 与 shell command 使用两层分离、顺序固定的编码。先把 identity 中每个单引号加倍，
 再用单引号包围为 SQLite string literal；组装完整 SQL 后，再把其每个单引号替换为 POSIX
@@ -874,7 +875,8 @@ owner。Composition 必须按 Core 返回的 typed `MappingReason` 分派 `Insta
 Hooks 配置只调用同一个 `mobius hook ...` executable，保持窄边界：
 
 - pre-tool-use：阻止绕过 Core service 修改 `.gitignore` policy、数据库、WAL、SHM、artifact 与 staging；只对
-  第 4.7 节 literal canonical SQLite read shape 放行，逐次验证同一 executable 版本；
+  第 4.7 节 literal canonical SQLite read shape 放行；Hook 验证静态 shape 与 canonical binding，Agent host
+  card 负责 standalone executable 解析与版本探测；
 - stop：只有最终文本明确声称指定 Objective 已完成时，读取 Core 并要求状态为 `Achieved`。
 
 Hooks 不启动 Objective、不推进 loop、不调用 subagent、不形成 Judgment、不复制 completion 逻辑。它们属于
