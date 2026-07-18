@@ -582,7 +582,7 @@ fn shell_segment_destroys_core_descendants_from_unknown(
 }
 
 struct LiteralShellCommand {
-    executable: String,
+    executable: ShellWord,
     direct_exec: bool,
     operation: String,
     arguments: Vec<ShellWord>,
@@ -599,15 +599,22 @@ enum LiteralShellCommandParse {
 
 #[derive(Clone)]
 enum ShellWord {
-    Static(String),
+    Static { value: String, raw: String },
     Unsupported,
 }
 
 impl ShellWord {
     fn static_value(&self) -> Option<&str> {
         match self {
-            Self::Static(value) => Some(value),
+            Self::Static { value, .. } => Some(value),
             Self::Unsupported => None,
+        }
+    }
+
+    fn is_canonical_shell_word(&self) -> bool {
+        match self {
+            Self::Static { value, raw } => raw == &format!("'{}'", value.replace('\'', "'\"'\"'")),
+            Self::Unsupported => false,
         }
     }
 }
@@ -618,6 +625,18 @@ fn static_arguments(arguments: &[ShellWord]) -> Option<Vec<&str>> {
 
 fn supported_sqlite_read(command: &LiteralShellCommand, project_root: &Path) -> bool {
     if command.operation != "sqlite3" || !command.direct_exec || !command.cwd_overrides.is_empty() {
+        return false;
+    }
+    if !command.executable.is_canonical_shell_word()
+        || !command
+            .arguments
+            .get(7)
+            .is_some_and(ShellWord::is_canonical_shell_word)
+        || !command
+            .arguments
+            .get(8)
+            .is_some_and(ShellWord::is_canonical_shell_word)
+    {
         return false;
     }
     let Some(arguments) = static_arguments(&command.arguments) else {
@@ -641,7 +660,9 @@ fn supported_sqlite_read(command: &LiteralShellCommand, project_root: &Path) -> 
         return false;
     }
 
-    let executable = Path::new(&command.executable);
+    let Some(executable) = command.executable.static_value().map(Path::new) else {
+        return false;
+    };
     if !executable.is_absolute()
         || executable.file_name().and_then(|name| name.to_str()) != Some("sqlite3")
         || fs::canonicalize(executable).ok().as_deref() != Some(executable)
@@ -738,7 +759,7 @@ fn literal_shell_command(segment: &str) -> LiteralShellCommandParse {
         .any(|word| word.starts_with("GIT_ICASE_PATHSPECS="));
     let arguments = words[location.index + 1..].to_vec();
     LiteralShellCommandParse::Exec(LiteralShellCommand {
-        executable: operation_word.to_owned(),
+        executable: words[location.index].clone(),
         direct_exec: location.index == 0,
         operation,
         arguments,
@@ -834,6 +855,7 @@ impl<'input> StaticShellWordReader<'input> {
             return None;
         }
 
+        let raw_start = self.index;
         let mut word = String::new();
         let mut started = false;
         let mut supported = true;
@@ -965,7 +987,10 @@ impl<'input> StaticShellWordReader<'input> {
         }
         started.then_some({
             if supported {
-                ShellWord::Static(word)
+                ShellWord::Static {
+                    value: word,
+                    raw: self.input[raw_start..self.index].to_owned(),
+                }
             } else {
                 ShellWord::Unsupported
             }
@@ -3887,22 +3912,16 @@ mod tests {
             sql
         );
 
-        assert_eq!(
-            pre_tool_use_output(&tool_input_at(
-                "exec_command",
-                json!({"cmd": exact}),
-                root.to_str().unwrap(),
-            )),
-            None
-        );
-        assert_eq!(
-            pre_tool_use_output(&tool_input_at(
-                "exec_command",
-                json!({"cmd": exact}),
-                outside.to_str().unwrap(),
-            )),
-            None
-        );
+        for cwd in [&root, &outside] {
+            assert!(
+                pre_tool_use_output(&tool_input_at(
+                    "exec_command",
+                    json!({"cmd": exact}),
+                    cwd.to_str().unwrap(),
+                ))
+                .is_some()
+            );
+        }
 
         let identity = "typed O'Brien \"double\" \\ slash\nwhite space\t$HOME $(touch mobius-sql-injected) \
                         `touch mobius-sql-injected`; touch mobius-sql-injected; \
@@ -3954,6 +3973,12 @@ mod tests {
                 database.display(),
                 sql
             ),
+            format!(
+                "{} --safe --readonly --batch --bail --init /dev/null --line {} \"{}\"",
+                shell_word(sqlite.to_str().unwrap()),
+                shell_word(database.to_str().unwrap()),
+                sql
+            ),
             format!("{exact} > {}-wal", database.display()),
         ] {
             assert!(
@@ -3970,7 +3995,7 @@ mod tests {
         assert!(
             pre_tool_use_output(&tool_input_at(
                 "exec_command",
-                json!({"cmd": exact}),
+                json!({"cmd": quoted}),
                 root.to_str().unwrap(),
             ))
             .is_some()
