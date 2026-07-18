@@ -1,7 +1,7 @@
 interface:
   display_name: "Mobius Loop"
-  short_description: "Run one explicit Objective through Mobius Core"
-  default_prompt: "Use $mobius-loop to continue the explicitly selected Objective from current Core state."
+  short_description: "Run an explicit Mobius Objective from live state"
+  default_prompt: "Use $mobius-loop to run or continue the explicitly named Mobius Objective from live Core state."
 dependencies:
   tools:
     - type: "mcp"
