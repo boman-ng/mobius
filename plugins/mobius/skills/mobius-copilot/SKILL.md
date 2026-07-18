@@ -41,6 +41,10 @@ Canonicalize the packaged Mobius path and require a regular executable. Never us
 `command -v mobius`, a bare name, PATH fallback, a Cargo target, or a development-checkout launcher. An absent
 packaged binary means the plugin is not assembled; report that fact instead of guessing.
 
+Resolve SQLite in standalone probes: `type -P sqlite3`; then `realpath -- <candidate>` and
+`<canonical> --version`. Require a canonical regular `sqlite3 >= 3.40.1` and use it. Never guess
+`/usr/bin/sqlite3` or mix in project inspection.
+
 Initialize only for an explicit activation when no binding exists. Read existing state through this
 sole command shape, substituting literal canonical paths:
 
@@ -141,7 +145,8 @@ Recover mechanically:
   start a new fence. Never retry an unchanged payload.
 - stale head: discard the draft, semantic decision, confirmation, and fence; rebuild from live
   state.
-- path or hook failure: rebuild the host card and canonical command; never try an alias or PATH.
+- path or hook failure: rerun standalone discovery and rebuild the canonical command; never guess a
+  path or execute the read through a bare name, alias, or PATH.
 - presentation failure after an accepted transition: keep the Core result and report the missing
   view; never replay business state.
 - admission or store failure: leave managed state untouched and report the owning failure.

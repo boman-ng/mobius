@@ -109,6 +109,8 @@ fn composition_has_one_bounded_sql_read_path_and_four_write_tools() {
         }
         for contract in [
             "3.40.1",
+            "`type -P sqlite3`",
+            "Never guess `/usr/bin/sqlite3`",
             "--safe --readonly --batch --bail --init /dev/null --line",
             "PRAGMA query_only=ON; BEGIN;",
             "sqlite_text(v)",
