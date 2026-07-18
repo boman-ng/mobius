@@ -1,7 +1,7 @@
 interface:
   display_name: "Mobius Copilot"
-  short_description: "Manage one explicit Objective and Map in Core"
-  default_prompt: "Use $mobius-copilot to manage the explicitly selected Objective and Map in Mobius Core."
+  short_description: "Manage an explicit Mobius Objective contract"
+  default_prompt: "Use $mobius-copilot to activate, revise, abandon, or continue Map installation for the explicitly named Mobius Objective."
 dependencies:
   tools:
     - type: "mcp"

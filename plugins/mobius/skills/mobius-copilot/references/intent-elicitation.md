@@ -45,11 +45,25 @@ agent.
 
 ## Prepare the presentation summary
 
-Before exact confirmation, show a concise interpretation summary and accept corrections. After the
-ObjectiveSpec is final, send this sibling of `command` with the activation or revision call:
+Before exact confirmation, show a concise interpretation summary and accept corrections. In the
+normal Copilot path, send the complete five-field `interaction` beside `command` in the same
+activation or revision call:
 
 ```json
 {
+  "project_root": "<canonical-project-root>",
+  "project_id": "<project-id>",
+  "expected_heads": {
+    "expected_project_seq": 0,
+    "expected_objective_seq": 0
+  },
+  "request_id": "<id for this exact payload>",
+  "command": {
+    "<activate_objective-or-revise_objective>": {
+      "objective_spec": {},
+      "confirmation": {}
+    }
+  },
   "interaction": {
     "interpreted_intent": "Markdown summary of the agreed outcome",
     "confirmed_boundaries": "Markdown summary of contract boundaries and non-goals",
