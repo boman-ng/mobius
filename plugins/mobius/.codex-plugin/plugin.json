@@ -1,6 +1,6 @@
 {
   "name": "mobius",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Local-only Mobius v1 with typed state, guarded evidence review, and explicit main-Agent composition.",
   "author": {
     "name": "Mobius contributors",
