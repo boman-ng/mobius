@@ -2,7 +2,6 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -436,6 +435,20 @@ fn shell_command_destroys_core_descendants(
             push_unique_project_root(&mut bound_roots, root);
         }
         for execution in plan.executions {
+            for sequential_cwd in &execution.cwds.known {
+                if find_pipeline_may_mutate_core(
+                    &execution.commands,
+                    sequential_cwd.as_deref(),
+                    &bound_roots,
+                ) {
+                    return true;
+                }
+            }
+            if execution.cwds.ambiguous
+                && find_pipeline_may_mutate_core(&execution.commands, None, &bound_roots)
+            {
+                return true;
+            }
             for segment in execution.commands {
                 for sequential_cwd in &execution.cwds.known {
                     if shell_segment_destroys_core_descendants(
@@ -572,7 +585,7 @@ fn shell_segment_destroys_core_descendants_from_unknown(
                 || git_clean_may_destroy_project_from_unknown(&command, project_root),
                 |cwd| git_clean_destroys_project_ancestor(&command, Some(cwd), project_root),
             ),
-            "find" => find_delete_destroys_project_ancestor(&command, target_is_ancestor),
+            "find" => find_effect_destroys_project_ancestor(&command, target_is_ancestor),
             "chmod" | "chown" | "chgrp" => {
                 recursive_metadata_change_destroys_project_ancestor(&command, target_is_ancestor)
             }
@@ -678,7 +691,7 @@ fn supported_sqlite_read(command: &LiteralShellCommand, project_root: &Path) -> 
         return false;
     }
 
-    supported_sqlite_version(executable)
+    true
 }
 
 fn supported_sqlite_read_for_known_binding(
@@ -693,32 +706,6 @@ fn supported_sqlite_read_for_known_binding(
         .into_iter()
         .chain(database_project)
         .any(|project_root| supported_sqlite_read(command, &project_root))
-}
-
-fn supported_sqlite_version(executable: &Path) -> bool {
-    let Ok(output) = Command::new(executable).arg("--version").output() else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let Ok(stdout) = std::str::from_utf8(&output.stdout) else {
-        return false;
-    };
-    let Some(version) = stdout.split_whitespace().next() else {
-        return false;
-    };
-    let parts = version
-        .split('.')
-        .map(str::parse::<u64>)
-        .collect::<Result<Vec<_>, _>>();
-    let Ok(parts) = parts else {
-        return false;
-    };
-    let [major, minor, patch, ..] = parts.as_slice() else {
-        return false;
-    };
-    (*major, *minor, *patch) >= (3, 40, 1)
 }
 
 fn literal_shell_command(segment: &str) -> LiteralShellCommandParse {
@@ -1588,7 +1575,7 @@ fn resolve_unknown_scope(scope: Option<PathBuf>, target: &str) -> Option<PathBuf
     }
 }
 
-fn find_delete_destroys_project_ancestor<F>(
+fn find_effect_destroys_project_ancestor<F>(
     command: &LiteralShellCommand,
     target_is_ancestor: F,
 ) -> bool
@@ -1598,12 +1585,22 @@ where
     if !command
         .arguments
         .iter()
-        .filter_map(ShellWord::static_value)
-        .any(|argument| argument == "-delete")
+        .any(|argument| match argument.static_value() {
+            Some("-delete" | "-exec" | "-execdir" | "-ok" | "-okdir") => true,
+            Some(_) => false,
+            None => true,
+        })
     {
         return false;
     }
 
+    find_scope_matches(command, target_is_ancestor)
+}
+
+fn find_scope_matches<F>(command: &LiteralShellCommand, target_matches: F) -> bool
+where
+    F: Fn(&str) -> bool + Copy,
+{
     let mut index = 0;
     while let Some(argument) = command
         .arguments
@@ -1637,12 +1634,60 @@ where
         index += 1;
     }
     if starting_points.is_empty() {
-        !dynamic_start && target_is_ancestor(".")
+        dynamic_start || target_matches(".")
     } else {
-        starting_points
-            .iter()
-            .any(|target| target_is_ancestor(target))
+        starting_points.iter().any(|target| target_matches(target))
     }
+}
+
+fn find_pipeline_may_mutate_core(
+    segments: &[&str],
+    effective_cwd: Option<&Path>,
+    project_roots: &[PathBuf],
+) -> bool {
+    if segments.len() < 2 {
+        return false;
+    }
+    segments.iter().enumerate().any(|(index, segment)| {
+        let LiteralShellCommandParse::Exec(command) = literal_shell_command(segment) else {
+            return false;
+        };
+        if command.operation != "find"
+            || segments[index + 1..]
+                .iter()
+                .all(|consumer| pipeline_consumer_is_read_only(consumer))
+        {
+            return false;
+        }
+        let find_cwd = apply_filesystem_cwd_overrides(effective_cwd, &command.cwd_overrides);
+        find_scope_matches(&command, |target| {
+            let reaches_known_root = project_roots.iter().any(|project_root| {
+                find_cwd.as_deref().map_or_else(
+                    || path_may_be_project_ancestor_from_unknown(target, project_root),
+                    |cwd| path_is_project_ancestor(target, Some(cwd), project_root),
+                ) || candidate_may_reach_managed_scope(target, project_root)
+            });
+            reaches_known_root
+                || resolved_static_scope(target, find_cwd.as_deref()).is_some_and(|scope| {
+                    scope.is_absolute()
+                        && destructive_scope_contains_bound_project(
+                            &scope,
+                            destructive_symlink_policy(&command),
+                        )
+                })
+        })
+    })
+}
+
+fn pipeline_consumer_is_read_only(segment: &str) -> bool {
+    if has_active_shell_substitution(segment) || !redirection_destinations(segment).is_empty() {
+        return false;
+    }
+    let LiteralShellCommandParse::Exec(command) = literal_shell_command(segment) else {
+        return false;
+    };
+    shell_command_is_read_only(&command.operation)
+        || (command.operation == "sort" && command.arguments.is_empty())
 }
 
 fn recursive_metadata_change_destroys_project_ancestor<F>(
@@ -1685,7 +1730,7 @@ where
             .any(target_matches),
         "mv" => move_destroys_project_ancestor(command, target_matches),
         "git" => git_clean_destroys_matching_scope(command, effective_cwd, scope_matches),
-        "find" => find_delete_destroys_project_ancestor(command, target_matches),
+        "find" => find_effect_destroys_project_ancestor(command, target_matches),
         "chmod" | "chown" | "chgrp" => {
             recursive_metadata_change_destroys_project_ancestor(command, target_matches)
         }
@@ -2260,6 +2305,7 @@ fn shell_segment_may_mutate_core_from_unknown(segment: &str, project_root: &Path
             | "chown"
             | "chgrp"
             | "dd"
+            | "find"
             | "sqlite3"
     );
     if !known_mutation {
@@ -2892,6 +2938,16 @@ fn targeted_mutation_operands<'value>(
                 exact: true,
             }
         }
+        "find" => {
+            let mut targets = find_output_targets(arguments);
+            targets.extend(find_effect_targets(arguments));
+            MutationOperandTargets {
+                targets,
+                // Bound-project ancestor effects are checked separately;
+                // these are the complete static traversal and output scopes.
+                exact: true,
+            }
+        }
         "sqlite3" => MutationOperandTargets {
             targets: operands.first().copied().into_iter().collect(),
             exact: false,
@@ -2900,6 +2956,69 @@ fn targeted_mutation_operands<'value>(
             targets: Vec::new(),
             exact: false,
         },
+    }
+}
+
+fn find_output_targets<'value>(arguments: &[&'value str]) -> Vec<&'value str> {
+    let mut targets = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index] {
+            "-fls" | "-fprint" | "-fprint0" => {
+                if let Some(target) = arguments.get(index + 1) {
+                    targets.push(*target);
+                }
+                index += 2;
+            }
+            "-fprintf" => {
+                if let Some(target) = arguments.get(index + 1) {
+                    targets.push(*target);
+                }
+                index += 3;
+            }
+            _ => index += 1,
+        }
+    }
+    targets
+}
+
+fn find_effect_targets<'value>(arguments: &[&'value str]) -> Vec<&'value str> {
+    if !arguments.iter().any(|argument| {
+        matches!(
+            *argument,
+            "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"
+        )
+    }) {
+        return Vec::new();
+    }
+
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        match *argument {
+            "-H" | "-L" | "-P" => index += 1,
+            "-D" => {
+                if arguments.get(index + 1).is_none() {
+                    return Vec::new();
+                }
+                index += 2;
+            }
+            argument if argument.starts_with("-D") || argument.starts_with("-O") => index += 1,
+            _ => break,
+        }
+    }
+
+    let mut starting_points = Vec::new();
+    while let Some(argument) = arguments.get(index) {
+        if argument.starts_with('-') || matches!(*argument, "!" | "(" | ")" | ",") {
+            break;
+        }
+        starting_points.push(*argument);
+        index += 1;
+    }
+    if starting_points.is_empty() {
+        vec!["."]
+    } else {
+        starting_points
     }
 }
 
@@ -3868,8 +3987,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn sqlite_read_exception_requires_one_exact_safe_read_shape() {
+    fn sqlite_read_admission_uses_literal_safe_shape_without_version_side_effect() {
         use std::os::unix::fs::PermissionsExt as _;
+        use std::process::Command;
 
         let root =
             std::env::temp_dir().join(format!("mobius-hook-sqlite-test-{}", uuid::Uuid::new_v4()));
@@ -3877,6 +3997,7 @@ mod tests {
         let database = root.join(".mobius/mobius.sqlite3");
         fs::write(&database, b"binding marker").unwrap();
         let captured_sql = root.join("captured-sql");
+        let version_probe = root.join("version-probe");
         let bin = root.join("bin");
         fs::create_dir(&bin).unwrap();
         let sqlite = bin.join("sqlite3");
@@ -3885,11 +4006,13 @@ mod tests {
             format!(
                 "#!/bin/sh\n\
                  if [ \"$#\" -eq 1 ] && [ \"$1\" = --version ]; then\n\
-                   printf '3.40.1 test-build\\n'\n\
+                   printf probed > '{}'\n\
+                   printf '3.26.0 old-build\\n'\n\
                    exit 0\n\
                  fi\n\
                  [ \"$#\" -eq 9 ] || exit 64\n\
                  printf '%s' \"$9\" > '{}'\n",
+                version_probe.display(),
                 captured_sql.display()
             ),
         )
@@ -3951,6 +4074,10 @@ mod tests {
             )),
             None
         );
+        assert!(
+            !version_probe.exists(),
+            "Hook admission must inspect the literal command instead of executing the host CLI"
+        );
         let status = Command::new("/bin/sh")
             .arg("-c")
             .arg(&quoted)
@@ -3991,17 +4118,66 @@ mod tests {
             );
         }
 
-        fs::write(&sqlite, b"#!/bin/sh\nprintf '3.40.0 old-build\\n'\n").unwrap();
-        assert!(
-            pre_tool_use_output(&tool_input_at(
-                "exec_command",
-                json!({"cmd": quoted}),
-                root.to_str().unwrap(),
-            ))
-            .is_some()
-        );
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir(outside);
+    }
+
+    #[test]
+    fn bound_project_scopes_find_effects_outputs_and_pipeline_consumers() {
+        let root =
+            std::env::temp_dir().join(format!("mobius-hook-find-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".mobius")).unwrap();
+        fs::create_dir(root.join("docs")).unwrap();
+        fs::write(root.join(".mobius/mobius.sqlite3"), b"binding marker").unwrap();
+
+        let read_only_discovery = format!(
+            "type -P sqlite3; find '{}' -maxdepth 1 -type f -printf '%f\\n' | sort",
+            root.join(".mobius").display()
+        );
+        for allowed in [
+            read_only_discovery.as_str(),
+            "find . -type f -print",
+            "find . -type f -print | grep mobius | sort",
+            "find docs -type f -delete",
+            "find docs -type f -exec rm -f '{}' +",
+            "find docs -type f -fprint debug-find-output",
+        ] {
+            assert_eq!(
+                pre_tool_use_output(&tool_input_at(
+                    "exec_command",
+                    json!({"cmd": allowed}),
+                    root.to_str().unwrap(),
+                )),
+                None,
+                "ordinary-scope or read-only find command must remain available: {allowed}"
+            );
+        }
+
+        for denied in [
+            "find . -type f -delete",
+            "find . -type f -exec rm -f '{}' +",
+            "find . -type f -execdir rm -f '{}' +",
+            "find . -type f -ok rm -f '{}' \\;",
+            "find . -type f -okdir rm -f '{}' \\;",
+            "find . -type f -print0 | xargs -0 rm -f",
+            "find .mobius -type f -print0 | xargs -0 rm -f",
+            "find docs -type f -fls .mobius/mobius.sqlite3",
+            "find docs -type f -fprint .mobius/mobius.sqlite3",
+            "find docs -type f -fprint0 .mobius/mobius.sqlite3",
+            "find docs -type f -fprintf .mobius/mobius.sqlite3 '%p\\n'",
+        ] {
+            assert!(
+                pre_tool_use_output(&tool_input_at(
+                    "exec_command",
+                    json!({"cmd": denied}),
+                    root.to_str().unwrap(),
+                ))
+                .is_some(),
+                "find command that can mutate Core-owned state must be denied: {denied}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(root);
     }
 
     fn stop_input(message: &str) -> StopInput {
