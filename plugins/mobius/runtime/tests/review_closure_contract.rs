@@ -12,6 +12,11 @@ const OBJECTIVE: &str = "objective-review";
 const LOOP_SKILL: &str = include_str!("../../skills/mobius-loop/SKILL.md");
 const REVIEW_REFERENCE: &str = include_str!("../../skills/mobius-loop/references/review-read.md");
 
+fn contains_prose(haystack: &str, needle: &str) -> bool {
+    let normalize = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalize(haystack).contains(&normalize(needle))
+}
+
 fn sha256_text(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("sha256:{}", lower_hex(&digest))
@@ -189,20 +194,23 @@ fn verified_snapshot_range(
 fn recursive_review_closure_includes_grandchild_and_deduplicates_convergence() {
     for contract in [
         "references/review-read.md",
-        "Only after the live state is `Reviewing`",
-        "A Decision is forbidden until exact row",
-        "Do not load that recipe for\nother states",
-    ] {
-        assert!(LOOP_SKILL.contains(contract), "Loop omitted {contract}");
-    }
-    for contract in [
-        "Recurse until no unseen dependency Decision remains",
-        "Deduplicate each\nkind by immutable exact identity",
-        "declared distinct identity count to equal the returned distinct row count",
-        "Re-read both heads and the current\nPacket identity",
+        "In `Reviewing` only",
+        "complete its recursive closure",
+        "Never load either recipe elsewhere",
     ] {
         assert!(
-            REVIEW_REFERENCE.contains(contract),
+            contains_prose(LOOP_SKILL, contract),
+            "Loop omitted {contract}"
+        );
+    }
+    for contract in [
+        "Recurse until no unseen identity remains",
+        "deduplicate each kind by immutable identity",
+        "declared distinct count to equal its read and verified distinct counts",
+        "Re-read both heads, live `Reviewing` state, and the same root Packet",
+    ] {
+        assert!(
+            contains_prose(REVIEW_REFERENCE, contract),
             "Review reference omitted {contract}"
         );
     }
