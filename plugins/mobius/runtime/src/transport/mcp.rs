@@ -433,6 +433,7 @@ fn apply_transition_with_presentation(
 fn decode_apply_transition_arguments(
     mut arguments: Value,
 ) -> Result<(ApplyTransitionRequest, Option<InteractionSummary>), ServiceError> {
+    let transition = transition_kind_from_arguments(&arguments);
     let object = arguments.as_object_mut().ok_or_else(|| {
         ServiceError::new("invalid_tool_input", "tool arguments must be an object")
     })?;
@@ -441,9 +442,28 @@ fn decode_apply_transition_arguments(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|error| ServiceError::new("invalid_tool_input", error.to_string()))?;
-    let request = serde_json::from_value(arguments)
-        .map_err(|error| ServiceError::new("invalid_tool_input", error.to_string()))?;
+    let request = serde_json::from_value(arguments).map_err(|error| {
+        let mut message = error.to_string();
+        if let Some(transition) = transition {
+            message.push_str(&format!(
+                ". Expected {}. Do not retry unchanged; rebuild the command with a new request_id, then re-read both heads immediately before one submission",
+                transition_wrapper(transition)
+            ));
+        }
+        ServiceError::new("invalid_tool_input", message)
+    })?;
     Ok((request, interaction))
+}
+
+fn transition_kind_from_arguments(arguments: &Value) -> Option<TransitionKind> {
+    let command = arguments.get("command")?.as_object()?;
+    if command.len() != 1 {
+        return None;
+    }
+    let name = command.keys().next()?;
+    TransitionKind::ALL
+        .into_iter()
+        .find(|kind| kind.schema_name() == name)
 }
 
 fn best_effort_transition_interaction(
@@ -681,7 +701,27 @@ fn tool_error_result(error: &ServiceError) -> Value {
     )
 }
 
+fn transition_wrapper(kind: TransitionKind) -> String {
+    format!(
+        "command.{}={{{}}}",
+        kind.schema_name(),
+        required_input_fields(kind).join(",")
+    )
+}
+
+fn transition_wrapper_guidance() -> String {
+    TransitionKind::ALL
+        .into_iter()
+        .map(transition_wrapper)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn tool_definitions() -> Vec<Value> {
+    let apply_transition_description = format!(
+        "Submit one typed mutation at exact heads. Exact wrappers: {}. Activate/revise may include a presentation-only interaction summary and return interaction_path when written. Returns an immutable Core commit receipt with Objective, transition, committed heads, and event digest. Same request_id+payload is idempotent; stale heads or changed payload return isError=true with mobius.error.v1. On invalid_tool_input, do not retry unchanged: rebuild with a new request_id, then re-read both heads immediately before one submission.",
+        transition_wrapper_guidance()
+    );
     vec![
         tool(
             "mobius_project_init",
@@ -714,7 +754,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "mobius_apply_transition",
-            "Submit one typed mutation at exact heads. Activate/revise may include a presentation-only interaction summary and then return interaction_path when written. Returns an immutable Core commit receipt with Objective, transition, committed heads, and event digest. Same request_id+payload is idempotent; stale heads or changed payload return isError=true with mobius.error.v1.",
+            &apply_transition_description,
             apply_transition_schema(),
             apply_transition_output_schema(),
             false,
@@ -1585,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn next_action_required_inputs_are_the_exact_command_payload_schema_fields() {
+    fn mutation_guidance_and_schema_share_the_exact_command_payload_fields() {
         let schema = apply_transition_schema();
         for (kind, definition) in [
             (
@@ -1606,7 +1646,7 @@ mod tests {
             assert_eq!(
                 schema["$defs"][definition]["required"],
                 json!(required_input_fields(kind)),
-                "{kind:?} NextAction guidance drifted from its MCP payload schema"
+                "{kind:?} guidance drifted from its MCP payload schema"
             );
         }
 
@@ -1620,5 +1660,42 @@ mod tests {
             seal["required"],
             json!(required_input_fields(TransitionKind::SealAttempt))
         );
+
+        let description = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "mobius_apply_transition")
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for kind in TransitionKind::ALL {
+            assert!(description.contains(&transition_wrapper(kind)), "{kind:?}");
+        }
+        assert!(description.contains("do not retry unchanged"));
+        assert!(description.contains("new request_id"));
+        assert!(description.contains("re-read both heads"));
+    }
+
+    #[test]
+    fn malformed_known_transition_returns_one_executable_recovery_hint() {
+        let error = decode_apply_transition_arguments(json!({
+            "project_root": "/tmp/project",
+            "project_id": "project-1",
+            "expected_heads": {
+                "expected_project_seq": 3,
+                "expected_objective_seq": 2
+            },
+            "request_id": "request-1",
+            "command": {
+                "record_evidence": {"claims": []}
+            }
+        }))
+        .unwrap_err();
+
+        assert_eq!(error.code, "invalid_tool_input");
+        assert!(error.message.contains("command.record_evidence={evidence}"));
+        assert!(error.message.contains("Do not retry unchanged"));
+        assert!(error.message.contains("new request_id"));
+        assert!(error.message.contains("re-read both heads"));
     }
 }
