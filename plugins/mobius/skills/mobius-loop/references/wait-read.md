@@ -2,6 +2,10 @@
 
 Load this recipe only after a fresh targeted read shows the selected Objective is `Waiting`.
 
+Keep one ephemeral ledger: exact Wait/context input; chosen item/byte bounds; summary count/bytes;
+returned identities; parse/admission result; final head/state recheck. Any unknown field is failure;
+never persist or promote the ledger.
+
 Choose finite literal `<max-evidence-items>` and `<max-payload-bytes>` ceilings from the current
 command-output and Context budget. Reserve room for row labels, identities, and subsequent
 reasoning; the payload ceiling must be smaller than the raw host-output allowance. These are

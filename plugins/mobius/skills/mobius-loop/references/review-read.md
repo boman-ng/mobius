@@ -1,14 +1,15 @@
 # Formal Review read
 
-Load this recipe only after a fresh targeted read shows the selected Objective is `Reviewing`.
+Load only after a fresh read shows the selected Objective is `Reviewing`.
 
-Freeze both heads and the root Packet identity. Keep this closure ledger only in current context:
+Freeze heads/root Packet; keep this closure ledger only in current context:
 
 ```text
 Packet:   expected | read | kind/id verified
 Decision: expected | read | kind/id verified
 Evidence: expected | read | kind/id verified
 Artifact: expected | integrity verified
+Baseline: Evidence | bundle verified | current/superseded/unverifiable
 Final heads/root Packet: pending | passed
 ```
 
@@ -32,13 +33,20 @@ the prefix and construct the sole locator:
 <canonical-project-root>/.mobius/artifacts/blobs/<digest-hex>
 ```
 
-Before reading content, use literal non-writing filesystem operations to reject a missing path,
-symlink, non-regular file, escaped canonical path, size mismatch, or full-file SHA-256 mismatch.
-Hash as a stream. Read only one explicit `[offset, offset + length)` range needed for Judgment;
-reject an out-of-bounds or truncated range. Repeat the canonical-path, regular-file, full digest,
-and size verification after the range read. Shell paths must use the parent Skill's `shell_word`
-rule and contain no raw stored text. The procedure is observational only: never create, rename,
-rewrite, chmod, or delete the blob.
+Use literal non-writing operations to reject missing, symlink, non-regular, escaped, wrong-size, or
+wrong-digest content. Hash the full-file SHA-256 as a stream; read one explicit
+`[offset, offset + length)`; reject out-of-bounds/truncation; then repeat path/type/size/full-digest
+verification after the range read. Use parent `shell_word` and no raw stored text. This is
+observational only; never mutate the blob.
+
+After integrity closure, apply `evidence-bundle.md`; classify every Bundle `current-applicable`,
+`superseded`, or `unverifiable`. A mutable Criterion needs current applicable `supports`; address
+current `contradicts`/`unknown` or do not accept.
+
+Apply `risk-gate.md` to the exact frozen closure. Create one fresh required Judge task; any material
+change makes it stale. Only a valid, current, complete Judge result with matched freeze/coverage
+permits `accept`; absence or unusable advice blocks it. Unresolved Judge findings block `accept`;
+main independently closes the Review.
 
 Decide only after the ledger is complete. Re-read both heads, live `Reviewing` state, and the same
 root Packet. Any drift, incomplete payload read, unresolved artifact integrity, truncation, or
