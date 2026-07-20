@@ -19,6 +19,7 @@ enum StageAcceptGate {
 struct RequiredStageJudge<'a> {
     created_after_review_freeze: bool,
     outcome: &'a JudgeOutcome,
+    has_findings: bool,
     findings_resolved_by_main: bool,
 }
 
@@ -37,8 +38,8 @@ fn gate_stage_accept(
     }
 
     match required_judge.outcome {
-        JudgeOutcome::Advice { disposition, .. }
-            if disposition == "proceed" || required_judge.findings_resolved_by_main =>
+        JudgeOutcome::Advice { .. }
+            if !required_judge.has_findings || required_judge.findings_resolved_by_main =>
         {
             StageAcceptGate::Allowed
         }
@@ -903,6 +904,7 @@ fn every_stage_accept_requires_one_fresh_complete_judge_and_main_review() {
             Some(RequiredStageJudge {
                 created_after_review_freeze: true,
                 outcome: &proceed,
+                has_findings: false,
                 findings_resolved_by_main: false,
             }),
             true,
@@ -919,6 +921,7 @@ fn every_stage_accept_requires_one_fresh_complete_judge_and_main_review() {
             Some(RequiredStageJudge {
                 created_after_review_freeze: false,
                 outcome: &proceed,
+                has_findings: false,
                 findings_resolved_by_main: false,
             }),
             true,
@@ -930,6 +933,7 @@ fn every_stage_accept_requires_one_fresh_complete_judge_and_main_review() {
             Some(RequiredStageJudge {
                 created_after_review_freeze: true,
                 outcome: &proceed,
+                has_findings: false,
                 findings_resolved_by_main: false,
             }),
             false,
@@ -960,6 +964,7 @@ fn unavailable_inconclusive_degraded_or_unresolved_judge_blocks_stage_accept() {
                 Some(RequiredStageJudge {
                     created_after_review_freeze: true,
                     outcome,
+                    has_findings: false,
                     findings_resolved_by_main: false,
                 }),
                 true,
@@ -977,6 +982,7 @@ fn unavailable_inconclusive_degraded_or_unresolved_judge_blocks_stage_accept() {
             Some(RequiredStageJudge {
                 created_after_review_freeze: true,
                 outcome: &revise,
+                has_findings: true,
                 findings_resolved_by_main: false,
             }),
             true,
@@ -988,12 +994,31 @@ fn unavailable_inconclusive_degraded_or_unresolved_judge_blocks_stage_accept() {
             Some(RequiredStageJudge {
                 created_after_review_freeze: true,
                 outcome: &revise,
+                has_findings: true,
                 findings_resolved_by_main: true,
             }),
             true,
         ),
         StageAcceptGate::Allowed,
         "Judge advice remains advisory after the main Agent resolves every finding"
+    );
+
+    let proceed_with_findings = JudgeOutcome::Advice {
+        disposition: "proceed".to_owned(),
+        external: false,
+    };
+    assert_eq!(
+        gate_stage_accept(
+            Some(RequiredStageJudge {
+                created_after_review_freeze: true,
+                outcome: &proceed_with_findings,
+                has_findings: true,
+                findings_resolved_by_main: false,
+            }),
+            true,
+        ),
+        StageAcceptGate::Blocked("required_stage_judge_findings_unresolved"),
+        "a proceed recommendation cannot bypass unresolved findings"
     );
 }
 
