@@ -634,7 +634,7 @@ validate_codex_install() {
     sqlite_value "SELECT json_object('project_seq', project_seq, 'objective_seq', objective_seq, 'is_active', is_active, 'projection', json(CAST(projection_bytes AS TEXT))) AS value FROM objective_projection WHERE objective_id = '$objective' LIMIT 2;"
   }
 
-  run_installed_loop() {
+  run_installed_core_lane() {
     local lane=$1
     local objective=$2
     local base_project_seq=$3
@@ -646,7 +646,9 @@ validate_codex_install() {
     local evidence="evidence-$objective"
     local decision="decision-$objective"
     local spec contract map command context map_projection packet packet_id objective_state
-    local observation provenance audit_response achieved_snapshot
+    local observation provenance evidence_bundle observation_digest observation_size
+    local bundle_digest bundle_size bundle_bytes capture_arguments capture_response snapshot
+    local audit_response achieved_snapshot
 
     spec=$(jq -nc \
       --arg objective "$objective" \
@@ -658,7 +660,7 @@ validate_codex_install() {
         criteria: {
           ($criterion): {
             id: $criterion,
-            statement: "the installed full loop is observable",
+            statement: "the installed Core transport lane is observable",
             verification_rule: "inspect the frozen observation through read-only SQLite",
             scope: "local"
           }
@@ -689,7 +691,7 @@ validate_codex_install() {
 
     contract=$(jq -nc --arg criterion "$criterion" '
       {
-        outcome: "an installed loop reaches a verified state",
+        outcome: "an installed Core transport lane reaches a verified state",
         criteria: [$criterion],
         objective_boundaries: ["release workspace only"],
         output: "release gate observation"
@@ -762,7 +764,7 @@ validate_codex_install() {
             structural_context: $structural,
             hypothesis: "the bounded installed attempt satisfies the Stage",
             assumptions: ["the isolated release workspace remains available"],
-            rationale: "release-host full-loop gate"
+            rationale: "release-host Core transport gate"
           }
         }
       }')
@@ -810,12 +812,75 @@ validate_codex_install() {
       *) fail "unknown release E2E lane: $lane" ;;
     esac
 
+    observation_digest="sha256:$(printf '%s' "$observation" | sha256sum | awk '{print $1}')"
+    observation_size=$(printf '%s' "$observation" | wc -c | tr -d '[:space:]')
+    evidence_bundle=$(jq -cS -n \
+      --arg locator "release/$objective/verified-observation" \
+      --arg digest "$observation_digest" \
+      --argjson size_bytes "$observation_size" '
+      {
+        schema: "mobius.evidence-bundle.v1",
+        canonicalization: "mobius.canonical-json.v1",
+        material_baseline: {
+          kind: "artifact_set",
+          scope: {include: [$locator], exclude: []},
+          before: {
+            entries: [{logical_id: "verified-observation", digest: $digest, size_bytes: $size_bytes}]
+          },
+          after: {
+            entries: [{logical_id: "verified-observation", digest: $digest, size_bytes: $size_bytes}]
+          }
+        },
+        verification: [{
+          check_id: "installed-lane-check",
+          command_or_method: "bounded installed-lane observation inspection",
+          exit_status: 0,
+          output_identity: $digest,
+          assessment: "supports"
+        }],
+        observed_effects: {changed_surfaces: []},
+        counterevidence: [],
+        limits: ["installed release lane only"]
+      }')
+    bundle_size=$(printf '%s' "$evidence_bundle" | wc -c | tr -d '[:space:]')
+    [ "$bundle_size" -le 131072 ] \
+      || fail "installed Evidence Bundle exceeded its canonical byte budget"
+    jq -e '
+      .schema == "mobius.evidence-bundle.v1" and
+      .canonicalization == "mobius.canonical-json.v1" and
+      .material_baseline.before == .material_baseline.after and
+      (.material_baseline.after.entries | length) == 1 and
+      (.material_baseline.after.entries[0].digest | test("^sha256:[0-9a-f]{64}$")) and
+      (.verification | length) == 1 and
+      (.verification[0].output_identity | test("^sha256:[0-9a-f]{64}$"))
+    ' <<<"$evidence_bundle" >/dev/null \
+      || fail "installed lane constructed an invalid Evidence Bundle"
+    bundle_digest="sha256:$(printf '%s' "$evidence_bundle" | sha256sum | awk '{print $1}')"
+    bundle_bytes=$(jq -Rn --arg text "$evidence_bundle" \
+      '$text | explode | select(all(.[]; . < 128))') \
+      || fail "installed Evidence Bundle must remain ASCII for byte-exact shell transport"
+    [ -n "$bundle_bytes" ] \
+      || fail "installed Evidence Bundle contained a non-ASCII transport byte"
+    capture_arguments=$(jq -nc \
+      --arg root "$workspace" \
+      --arg project_id "$project_id" \
+      --argjson bytes "$bundle_bytes" '
+      {binding: {project_root: $root, project_id: $project_id}, bytes: $bytes}')
+    capture_response=$(mcp_wire_call mobius_capture_artifact "$capture_arguments")
+    snapshot=$(jq -ce \
+      --arg digest "$bundle_digest" \
+      --argjson size_bytes "$bundle_size" '
+      .result.structuredContent |
+      select(.digest == $digest and .size_bytes == $size_bytes)
+    ' <<<"$capture_response") \
+      || fail "installed MCP returned the wrong Evidence Bundle snapshot identity"
+
     command=$(jq -nc \
       --arg evidence "$evidence" \
       --arg attempt "$attempt" \
       --arg criterion "$criterion" \
-      --arg observation "$observation" \
       --arg provenance "$provenance" \
+      --argjson snapshot "$snapshot" \
       --argjson context "$context" '
       {
         record_evidence: {
@@ -825,13 +890,16 @@ validate_codex_install() {
             context: $context,
             purpose: "stage_review",
             claims: {($criterion): "supports"},
-            observation: {inline: {string: $observation}},
-            provenance: {string: $provenance}
+            observation: {core_snapshot: $snapshot},
+            provenance: {string: ($provenance + "; canonical Evidence Bundle B1")}
           }
         }
       }')
     mcp_apply_transition \
       "$objective" "$((base_project_seq + 5))" 5 "$lane-record-evidence" record_evidence "$command"
+
+    [ "sha256:$(printf '%s' "$evidence_bundle" | sha256sum | awk '{print $1}')" = "$bundle_digest" ] \
+      || fail "installed Evidence Bundle drifted before SealAttempt"
 
     command=$(jq -nc \
       --arg attempt "$attempt" \
@@ -865,6 +933,9 @@ validate_codex_install() {
       )
     ' <<<"$packet" >/dev/null || fail "read-only SQLite returned invalid Core review material"
 
+    [ "sha256:$(printf '%s' "$evidence_bundle" | sha256sum | awk '{print $1}')" = "$bundle_digest" ] \
+      || fail "installed Evidence Bundle drifted before Decision"
+
     command=$(jq -nc \
       --arg decision "$decision" \
       --arg packet "$packet_id" \
@@ -895,7 +966,7 @@ validate_codex_install() {
       .projection.objective_state.achieved.objective == $objective and
       .projection.objective_state.achieved.manifest == {($stage): $decision}
     ' <<<"$achieved_snapshot" >/dev/null \
-      || fail "installed $lane loop did not reach a fresh Achieved state"
+      || fail "installed $lane Core transport lane did not reach a fresh Achieved state"
 
     audit_response=$(
       cd "$workspace"
@@ -908,7 +979,7 @@ validate_codex_install() {
       .issues.complete == true and
       .issues.items == []
     ' <<<"$audit_response" >/dev/null \
-      || fail "installed $lane loop did not finish with a healthy audit"
+      || fail "installed $lane Core transport lane did not finish with a healthy audit"
   }
 
   init_arguments=$(jq -nc \
@@ -926,7 +997,7 @@ validate_codex_install() {
     .objective_count == 0
   ' <<<"$initial_state" >/dev/null || fail "read-only SQLite returned unexpected initial state"
 
-  run_installed_loop direct release-direct 0 ''
+  run_installed_core_lane direct release-direct 0 ''
 
   delegated_result=$(jq -nc '
     {
@@ -939,7 +1010,7 @@ validate_codex_install() {
         ]
       }
     }')
-  run_installed_loop delegated release-delegated 8 "$delegated_result"
+  run_installed_core_lane delegated release-delegated 8 "$delegated_result"
 
   [ -f "$workspace/.mobius/mobius.sqlite3" ] \
     || fail "installed MCP did not create project-local state"
