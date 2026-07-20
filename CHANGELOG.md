@@ -2,6 +2,22 @@
 
 All notable changes to Mobius are documented here.
 
+## 1.3.0 - 2026-07-20
+
+- Add canonical Evidence Bundle v1 guidance and a deterministic test oracle for repository,
+  artifact, external-object, and intrinsic baselines, including a fixed byte budget and
+  Record/Seal/Decision freshness gates.
+- Route later effects that invalidate accepted proof through existing Remap/carry/reverification,
+  preserve mixed-baseline Packet history, and keep terminal Objectives immutable.
+- Select Driver and Verifier by information value and independent failure-model coverage; require
+  one fresh advisory Judge in every Stage Review, and validate generic native final results,
+  freeze, coverage, budget, overflow, and degraded outcomes without assuming a particular review
+  skill or provider.
+- Add live-schema transition drafts, ten fail-closed Agent-control fixtures, exact confirmation and
+  recovery rules, a synthetic D0 session-audit contract, and conditional C1/D1 gates.
+- Keep full SHA-256 at machine integrity boundaries while using task-local semantic ids and optional
+  last-seven-hex display hints in repeated Agent context.
+
 ## 1.2.2 - 2026-07-18
 
 - Resolve the host SQLite executable through standalone PATH, canonicalization, and version probes
