@@ -3229,6 +3229,7 @@ fn shell_command_is_read_only(operation: &str) -> bool {
             | "shasum"
             | "stat"
             | "tail"
+            | "test"
             | "wc"
     )
 }
@@ -4176,6 +4177,40 @@ mod tests {
                 "find command that can mutate Core-owned state must be denied: {denied}"
             );
         }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_integrity_recipe_remains_read_only_for_managed_blobs() {
+        let root = std::env::temp_dir().join(format!(
+            "mobius-hook-review-integrity-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let blob = root.join(".mobius/artifacts/blobs/0123456789abcdef");
+        fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        fs::write(&blob, b"frozen review material").unwrap();
+
+        let command = format!(
+            "test -e '{path}' && test ! -L '{path}' && test -f '{path}'; \
+             stat -c 'size=%s type=%F' -- '{path}'; \
+             sha256sum -- '{path}'; \
+             dd if='{path}' bs=1 skip=0 count=22 status=none | sha256sum; \
+             test ! -L '{path}' && test -f '{path}'; \
+             stat -c 'size=%s type=%F' -- '{path}'; \
+             sha256sum -- '{path}'",
+            path = blob.display()
+        );
+
+        assert_eq!(
+            pre_tool_use_output(&tool_input_at(
+                "exec_command",
+                json!({"cmd": command}),
+                root.to_str().unwrap(),
+            )),
+            None,
+            "the documented read-only review integrity recipe must remain available"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
