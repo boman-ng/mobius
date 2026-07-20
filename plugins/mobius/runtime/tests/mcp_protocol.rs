@@ -7,6 +7,18 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+// The shared test oracle also exposes repository/external variants exercised by its dedicated
+// contract target; this MCP target intentionally consumes only the artifact-set slice.
+#[allow(dead_code)]
+#[path = "support/evidence_bundle.rs"]
+mod evidence_bundle;
+
+use evidence_bundle::{
+    ArtifactIdentity, ArtifactSetIdentity, Assessment, CANONICALIZATION, CanonicalEvidence,
+    Classification, CurrentMaterial, EVIDENCE_BUNDLE_SCHEMA, EvidenceBundle, MaterialBaseline,
+    MaterialScope, ObservedEffects, Verification, canonicalize, evaluate, sha256_identity,
+};
+
 const PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -692,6 +704,20 @@ fn record_evidence_command(
     observation: &str,
     provenance: Value,
 ) -> Value {
+    record_frozen_evidence_command(
+        fixture,
+        evidence_id,
+        json!({"inline": {"string": observation}}),
+        provenance,
+    )
+}
+
+fn record_frozen_evidence_command(
+    fixture: &AttemptingE2e,
+    evidence_id: &str,
+    observation: Value,
+    provenance: Value,
+) -> Value {
     json!({
         "record_evidence": {
             "evidence": {
@@ -700,11 +726,95 @@ fn record_evidence_command(
                 "context": fixture.context,
                 "purpose": "stage_review",
                 "claims": singleton_object(&fixture.criterion_id, json!("supports")),
-                "observation": {"inline": {"string": observation}},
+                "observation": observation,
                 "provenance": provenance
             }
         }
     })
+}
+
+fn material_scope(locator: &str) -> MaterialScope {
+    MaterialScope {
+        include: vec![locator.to_owned()],
+        exclude: Vec::new(),
+    }
+}
+
+fn artifact_identity(logical_id: &str, bytes: &[u8]) -> ArtifactIdentity {
+    ArtifactIdentity {
+        logical_id: logical_id.to_owned(),
+        digest: sha256_identity(bytes),
+        size_bytes: u64::try_from(bytes.len()).expect("fixture bytes fit u64"),
+    }
+}
+
+fn artifact_bundle(
+    locator: &str,
+    logical_id: &str,
+    before_bytes: &[u8],
+    after_bytes: &[u8],
+    verification_output: &[u8],
+) -> EvidenceBundle {
+    EvidenceBundle {
+        schema: EVIDENCE_BUNDLE_SCHEMA.to_owned(),
+        canonicalization: CANONICALIZATION.to_owned(),
+        material_baseline: MaterialBaseline::ArtifactSet {
+            scope: material_scope(locator),
+            before: ArtifactSetIdentity {
+                entries: vec![artifact_identity(logical_id, before_bytes)],
+            },
+            after: ArtifactSetIdentity {
+                entries: vec![artifact_identity(logical_id, after_bytes)],
+            },
+        },
+        verification: vec![Verification {
+            check_id: "direct-check".to_owned(),
+            command_or_method: "independent bounded fixture inspection".to_owned(),
+            exit_status: evidence_bundle::ExitStatus::Code(0),
+            output_identity: sha256_identity(verification_output),
+            assessment: Assessment::Supports,
+        }],
+        observed_effects: ObservedEffects {
+            changed_surfaces: Vec::new(),
+        },
+        counterevidence: Vec::new(),
+        limits: vec!["isolated fixture scope only".to_owned()],
+    }
+}
+
+fn current_artifact(locator: &str, logical_id: &str, bytes: &[u8]) -> CurrentMaterial {
+    CurrentMaterial::ArtifactSet {
+        scope: material_scope(locator),
+        identity: ArtifactSetIdentity {
+            entries: vec![artifact_identity(logical_id, bytes)],
+        },
+    }
+}
+
+fn capture_bundle_observation(
+    process: &mut McpProcess,
+    rpc_id: u64,
+    root: &Path,
+    project_id: &str,
+    bundle: &CanonicalEvidence,
+) -> Value {
+    let captured = call_tool(
+        process,
+        rpc_id,
+        "mobius_capture_artifact",
+        json!({
+            "binding": {"project_root": root, "project_id": project_id},
+            "bytes": bundle.bytes
+        }),
+        root,
+    );
+    let snapshot = assert_tool_success(&captured).clone();
+    assert_eq!(snapshot["digest"], bundle.identity);
+    assert_eq!(
+        snapshot["size_bytes"],
+        u64::try_from(bundle.bytes.len()).expect("canonical bundle size fits u64")
+    );
+    json!({"core_snapshot": snapshot})
 }
 
 struct ReviewingE2e {
@@ -1021,7 +1131,8 @@ fn full_verifier_delegation_task() -> Value {
         "output_format": {
             "representation": "json",
             "template": "the complete common result envelope plus the complete verifier role_output",
-            "constraints": ["return direct observations and native-item provenance; redact unrelated data"]
+            "constraints": ["return direct observations and native-item provenance; redact unrelated data"],
+            "result_budget": {"max_public_result_bytes": 8192}
         },
         "done_when": [{
             "id": "D1",
@@ -1058,6 +1169,7 @@ fn full_verifier_result(runtime_identity: &str) -> Value {
         "artifacts": [],
         "uncertainties": [],
         "blockers": [],
+        "overflow": {"omitted_items": 0, "artifact_ids": [], "reason": "none"},
         "role_output": {
             "subject_results": [{"subject_id": "VS1", "status": "verified", "evidence": [runtime_identity]}],
             "claim_results": [{"claim_id": "VC1", "assessment": "supports", "evidence": [runtime_identity]}],
@@ -1164,17 +1276,21 @@ fn result_covers_task_items(
 
 // This is deliberately test-local executable Composition evidence. It exercises the documented
 // main-agent checks without introducing a production parser, shared schema, or worker ledger.
+struct DelegatedCandidate {
+    observation: String,
+    provenance: Value,
+}
+
 fn consume_full_delegated_result<F>(
     task: &Value,
     result: &Value,
     runtime_identity: &str,
     delegated_heads: (u64, u64),
     fixture: &AttemptingE2e,
-    evidence_id: &str,
     submit: F,
 ) -> Result<Value, &'static str>
 where
-    F: FnOnce(Value) -> Value,
+    F: FnOnce(DelegatedCandidate) -> Value,
 {
     if delegated_heads != fixture.heads {
         return Err("stale_baseline");
@@ -1187,6 +1303,17 @@ where
     }
     if runtime_identity.trim().is_empty() {
         return Err("runtime_identity_missing");
+    }
+    let result_budget = task["output_format"]["result_budget"]["max_public_result_bytes"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or("task_result_budget_missing")?;
+    if serde_json::to_vec(result)
+        .map_err(|_| "result_serialization_failed")?
+        .len() as u64
+        > result_budget
+    {
+        return Err("result_budget_exceeded");
     }
     if !has_exact_fields(
         result,
@@ -1201,6 +1328,7 @@ where
             "artifacts",
             "uncertainties",
             "blockers",
+            "overflow",
             "role_output",
         ],
     ) {
@@ -1259,6 +1387,17 @@ where
         })
     {
         return Err("unresolved_result");
+    }
+    if !has_exact_fields(
+        &result["overflow"],
+        &["omitted_items", "artifact_ids", "reason"],
+    ) || result["overflow"]["omitted_items"] != 0
+        || !result["overflow"]["artifact_ids"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        || result["overflow"]["reason"] != "none"
+    {
+        return Err("result_overflow");
     }
 
     let effects = result["effects"]
@@ -1360,39 +1499,291 @@ where
             "verifier_evidence": {"list": verifier_evidence}
         }),
     );
-    Ok(submit(record_evidence_command(
-        fixture,
-        evidence_id,
-        observation,
+    Ok(submit(DelegatedCandidate {
+        observation: observation.to_owned(),
         provenance,
-    )))
+    }))
 }
 
 #[test]
-fn clean_stdio_mcp_direct_main_loop_reaches_achieved_and_healthy_audit() {
+fn clean_stdio_mcp_core_transport_lane_reaches_achieved_and_healthy_audit() {
     let workspace = Workspace::new();
     let launcher_workspace = Workspace::new();
     let root = workspace.path().canonicalize().unwrap();
     let mut process = McpProcess::spawn(launcher_workspace.path());
     let fixture = advance_public_mcp_to_attempting(&mut process, &root, "direct-e2e");
 
-    let recorded = apply_e2e_transition(
+    let material = b"direct main-agent observation from the installed runtime";
+    let candidate = artifact_bundle(
+        "fixtures/direct-observation",
+        "direct-observation",
+        material,
+        material,
+        material,
+    );
+    let current = current_artifact(
+        "fixtures/direct-observation",
+        "direct-observation",
+        material,
+    );
+    assert_eq!(
+        evaluate(&candidate, Some(&current)).classification,
+        Classification::CurrentApplicable
+    );
+    let canonical = canonicalize(&candidate).expect("direct Evidence Bundle is canonical");
+    let observation = capture_bundle_observation(
         &mut process,
         fixture.next_rpc_id,
         &root,
         &fixture.project_id,
+        &canonical,
+    );
+
+    let recorded = apply_e2e_transition(
+        &mut process,
+        fixture.next_rpc_id + 1,
+        &root,
+        &fixture.project_id,
         5,
         "direct-e2e-record-evidence",
-        record_evidence_command(
+        record_frozen_evidence_command(
             &fixture,
             "evidence-direct-e2e",
-            "direct observation inspected by the main agent",
-            json!({"string": "main agent directly inspected the local fixture"}),
+            observation,
+            json!({"string": "main agent validated Evidence Bundle B1 against current material"}),
         ),
     );
     assert_eq!(recorded["transition"], "record_evidence");
 
-    finish_public_mcp_achieved(&mut process, &root, &fixture, fixture.next_rpc_id + 1);
+    assert_eq!(
+        evaluate(&candidate, Some(&current)).classification,
+        Classification::CurrentApplicable,
+        "the Decision fence must revalidate the same current material"
+    );
+    finish_public_mcp_achieved(&mut process, &root, &fixture, fixture.next_rpc_id + 2);
+    process.finish();
+}
+
+#[test]
+fn pre_record_material_drift_keeps_the_candidate_outside_trail() {
+    let workspace = Workspace::new();
+    let launcher_workspace = Workspace::new();
+    let root = workspace.path().canonicalize().unwrap();
+    let mut process = McpProcess::spawn(launcher_workspace.path());
+    let fixture = advance_public_mcp_to_attempting(&mut process, &root, "pre-record-drift");
+
+    let candidate = artifact_bundle(
+        "fixtures/pre-record-material",
+        "pre-record-material",
+        b"material-v1",
+        b"material-v2",
+        b"verification-ran-across-drift",
+    );
+    let current = current_artifact(
+        "fixtures/pre-record-material",
+        "pre-record-material",
+        b"material-v2",
+    );
+    assert_eq!(
+        evaluate(&candidate, Some(&current)).classification,
+        Classification::Incoherent,
+        "before/after drift must stop the RecordEvidence path"
+    );
+
+    let connection = readonly_connection(&root);
+    let objective_seq: u64 = connection
+        .query_row(
+            "SELECT objective_seq FROM objective_streams WHERE objective_id = ?1",
+            [&fixture.objective_id],
+            |row| row.get(0),
+        )
+        .expect("Objective head remains observable");
+    let evidence_count: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM object_projection WHERE objective_id = ?1 AND object_kind = 'evidence'",
+            [&fixture.objective_id],
+            |row| row.get(0),
+        )
+        .expect("Evidence projection count remains observable");
+    assert_eq!(
+        objective_seq, 5,
+        "no transition was submitted for the candidate"
+    );
+    assert_eq!(
+        evidence_count, 0,
+        "incoherent candidate stayed outside Trail"
+    );
+    drop(connection);
+
+    let state = objective_projection(&root, &fixture.objective_id);
+    assert_eq!(
+        state["objective_state"]["navigating"]["navigation"]["attempting"]["attempt"],
+        fixture.attempt_id
+    );
+    assert_eq!(
+        readonly_audit(&root, &fixture.project_id)["status"],
+        "healthy"
+    );
+    process.finish();
+}
+
+#[test]
+fn record_and_decision_freshness_gates_preserve_history_and_block_stale_accept() {
+    let workspace = Workspace::new();
+    let launcher_workspace = Workspace::new();
+    let root = workspace.path().canonicalize().unwrap();
+    let material_path = root.join("fixtures/current-material.bin");
+    fs::create_dir_all(material_path.parent().unwrap()).expect("fixture directory is created");
+    fs::write(&material_path, b"material-v1").expect("v1 material is written");
+
+    let mut process = McpProcess::spawn(launcher_workspace.path());
+    let fixture = advance_public_mcp_to_attempting(&mut process, &root, "freshness-drift");
+    let locator = "fixtures/current-material.bin";
+    let logical_id = "current-material";
+
+    let v1 = fs::read(&material_path).expect("v1 material is captured");
+    let bundle_v1 = artifact_bundle(locator, logical_id, &v1, &v1, b"v1-check-output");
+    assert_eq!(
+        evaluate(
+            &bundle_v1,
+            Some(&current_artifact(locator, logical_id, &v1))
+        )
+        .classification,
+        Classification::CurrentApplicable
+    );
+    let canonical_v1 = canonicalize(&bundle_v1).expect("v1 Bundle is canonical");
+    let observation_v1 = capture_bundle_observation(
+        &mut process,
+        fixture.next_rpc_id,
+        &root,
+        &fixture.project_id,
+        &canonical_v1,
+    );
+    apply_e2e_transition(
+        &mut process,
+        fixture.next_rpc_id + 1,
+        &root,
+        &fixture.project_id,
+        5,
+        "freshness-record-v1",
+        record_frozen_evidence_command(
+            &fixture,
+            "evidence-freshness-v1",
+            observation_v1,
+            json!({"string": "main Agent admitted Bundle B1"}),
+        ),
+    );
+
+    fs::write(&material_path, b"material-v2").expect("v2 drift is injected before Seal");
+    let v2 = fs::read(&material_path).expect("v2 material is recaptured");
+    assert_eq!(
+        evaluate(
+            &bundle_v1,
+            Some(&current_artifact(locator, logical_id, &v2))
+        )
+        .classification,
+        Classification::Superseded
+    );
+
+    let bundle_v2 = artifact_bundle(locator, logical_id, &v2, &v2, b"v2-check-output");
+    assert_eq!(
+        evaluate(
+            &bundle_v2,
+            Some(&current_artifact(locator, logical_id, &v2))
+        )
+        .classification,
+        Classification::CurrentApplicable
+    );
+    let canonical_v2 = canonicalize(&bundle_v2).expect("v2 Bundle is canonical");
+    let observation_v2 = capture_bundle_observation(
+        &mut process,
+        fixture.next_rpc_id + 2,
+        &root,
+        &fixture.project_id,
+        &canonical_v2,
+    );
+    apply_e2e_transition(
+        &mut process,
+        fixture.next_rpc_id + 3,
+        &root,
+        &fixture.project_id,
+        6,
+        "freshness-record-v2",
+        record_frozen_evidence_command(
+            &fixture,
+            "evidence-freshness-v2",
+            observation_v2,
+            json!({"string": "main Agent admitted fresh Bundle B2"}),
+        ),
+    );
+    apply_e2e_transition(
+        &mut process,
+        fixture.next_rpc_id + 4,
+        &root,
+        &fixture.project_id,
+        7,
+        "freshness-seal",
+        json!({
+            "seal_attempt": {
+                "attempt": fixture.attempt_id,
+                "seal_reason": "submitted"
+            }
+        }),
+    );
+
+    let packet = current_review_packet(&root, &fixture.objective_id);
+    assert_eq!(
+        packet["review_packet"]["evidence_set"],
+        json!(["evidence-freshness-v1", "evidence-freshness-v2"]),
+        "Core Packet must retain both superseded and current baseline Evidence"
+    );
+    let packet_id = packet["review_packet"]["id"]
+        .as_str()
+        .expect("Review Packet has an identity")
+        .to_owned();
+
+    fs::write(&material_path, b"material-v3").expect("v3 drift is injected before Decision");
+    let v3 = fs::read(&material_path).expect("v3 material is recaptured");
+    let current_v3 = current_artifact(locator, logical_id, &v3);
+    assert_eq!(
+        evaluate(&bundle_v1, Some(&current_v3)).classification,
+        Classification::Superseded
+    );
+    assert_eq!(
+        evaluate(&bundle_v2, Some(&current_v3)).classification,
+        Classification::Superseded,
+        "no current-applicable supports Evidence remains at the Decision fence"
+    );
+
+    let decided = apply_e2e_transition(
+        &mut process,
+        fixture.next_rpc_id + 5,
+        &root,
+        &fixture.project_id,
+        8,
+        "freshness-retry-not-accept",
+        json!({
+            "decision": {
+                "decision": {
+                    "id": "decision-freshness-retry",
+                    "packet": packet_id,
+                    "judgments": singleton_object(&fixture.criterion_id, json!("unknown")),
+                    "findings": ["all supporting mutable Evidence is superseded"],
+                    "action": "retry"
+                }
+            }
+        }),
+    );
+    assert_eq!(decided["transition"], "decision");
+    let state = objective_projection(&root, &fixture.objective_id);
+    assert_eq!(
+        state["objective_state"]["navigating"]["navigation"]["ready"]["route"], fixture.route_id,
+        "Decision drift must take a non-accept lifecycle path"
+    );
+    assert!(state["objective_state"].get("achieved").is_none());
+    let audit = readonly_audit(&root, &fixture.project_id);
+    assert_eq!(audit["status"], "healthy");
+    assert_eq!(audit["project_seq"], 9);
     process.finish();
 }
 
@@ -1608,7 +1999,7 @@ fn clean_stdio_mcp_review_and_wait_branch_matrix_preserves_route_semantics() {
 }
 
 #[test]
-fn clean_stdio_mcp_delegated_composition_gates_full_result_then_main_reaches_achieved() {
+fn clean_stdio_mcp_delegated_candidate_translation_reaches_core_achieved() {
     let workspace = Workspace::new();
     let launcher_workspace = Workspace::new();
     let root = workspace.path().canonicalize().unwrap();
@@ -1628,6 +2019,9 @@ fn clean_stdio_mcp_delegated_composition_gates_full_result_then_main_reaches_ach
         "missing-f1",
         "missing-f2",
         "missing-provenance",
+        "missing-result-budget",
+        "result-budget-exceeded",
+        "result-overflow",
     ] {
         let mut rejected_task = task.clone();
         let mut rejected_result = result.clone();
@@ -1676,6 +2070,26 @@ fn clean_stdio_mcp_delegated_composition_gates_full_result_then_main_reaches_ach
                 rejected_result["role_output"]["check_results"][0]["evidence"] = json!([]);
                 "candidate_provenance_missing"
             }
+            "missing-result-budget" => {
+                rejected_task["output_format"]
+                    .as_object_mut()
+                    .expect("output format is an object")
+                    .remove("result_budget");
+                "task_result_budget_missing"
+            }
+            "result-budget-exceeded" => {
+                rejected_task["output_format"]["result_budget"]["max_public_result_bytes"] =
+                    json!(1);
+                "result_budget_exceeded"
+            }
+            "result-overflow" => {
+                rejected_result["overflow"] = json!({
+                    "omitted_items": 1,
+                    "artifact_ids": ["A-overflow"],
+                    "reason": "result_budget"
+                });
+                "result_overflow"
+            }
             _ => unreachable!(),
         };
 
@@ -1686,7 +2100,6 @@ fn clean_stdio_mcp_delegated_composition_gates_full_result_then_main_reaches_ach
             &runtime_identity,
             delegated_heads,
             &fixture,
-            &format!("evidence-rejected-{case}"),
             |_| {
                 submit_calls += 1;
                 json!({"unexpected": "submission"})
@@ -1710,13 +2123,43 @@ fn clean_stdio_mcp_delegated_composition_gates_full_result_then_main_reaches_ach
         &runtime_identity,
         (5, 5),
         &fixture,
-        "evidence-delegated-e2e",
-        |command| {
+        |candidate| {
             submit_calls += 1;
+            let material = candidate.observation.as_bytes();
+            let bundle = artifact_bundle(
+                "delegation/verifier-check-vk1",
+                "verifier-check-vk1",
+                material,
+                material,
+                material,
+            );
+            let current = current_artifact(
+                "delegation/verifier-check-vk1",
+                "verifier-check-vk1",
+                material,
+            );
+            assert_eq!(
+                evaluate(&bundle, Some(&current)).classification,
+                Classification::CurrentApplicable
+            );
+            let canonical = canonicalize(&bundle).expect("delegated Evidence Bundle is canonical");
+            let observation = capture_bundle_observation(
+                &mut process,
+                fixture.next_rpc_id + 1,
+                &root,
+                &fixture.project_id,
+                &canonical,
+            );
+            let command = record_frozen_evidence_command(
+                &fixture,
+                "evidence-delegated-e2e",
+                observation,
+                candidate.provenance,
+            );
             assert!(has_exact_fields(&command, &["record_evidence"]));
             call_tool(
                 &mut process,
-                fixture.next_rpc_id + 1,
+                fixture.next_rpc_id + 2,
                 "mobius_apply_transition",
                 json!({
                     "project_root": root,
@@ -1739,7 +2182,7 @@ fn clean_stdio_mcp_delegated_composition_gates_full_result_then_main_reaches_ach
     assert_eq!(submitted["committed_project_seq"], 6);
     assert_eq!(submitted["committed_objective_seq"], 6);
 
-    finish_public_mcp_achieved(&mut process, &root, &fixture, fixture.next_rpc_id + 2);
+    finish_public_mcp_achieved(&mut process, &root, &fixture, fixture.next_rpc_id + 3);
     process.finish();
 }
 

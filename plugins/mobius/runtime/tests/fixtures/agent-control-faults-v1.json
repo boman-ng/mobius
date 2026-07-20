@@ -1,0 +1,225 @@
+{
+  "schema": "mobius.agent-control-faults.v1",
+  "cases": [
+    {
+      "id": "safe-read-matcher",
+      "input": {
+        "read_shape": "unsupported",
+        "heads": "current",
+        "binding": "definitive",
+        "wrapper": "canonical",
+        "structural_context": "exact",
+        "subject_context": "exact",
+        "review_closure": "complete",
+        "artifact_integrity": "verified",
+        "wait_admission": "complete",
+        "context_freshness": "fresh"
+      },
+      "expected": {
+        "state": "unknown",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["draft", "request_id", "remembered_heads"],
+        "recovery": "rerun standalone SQLite discovery and rebuild one supported literal read"
+      }
+    },
+    {
+      "id": "stale-head",
+      "input": {
+        "read_shape": "supported_literal",
+        "heads": "stale",
+        "binding": "definitive",
+        "wrapper": "canonical",
+        "structural_context": "exact",
+        "subject_context": "exact",
+        "review_closure": "complete",
+        "artifact_integrity": "verified",
+        "wait_admission": "complete",
+        "context_freshness": "fresh"
+      },
+      "expected": {
+        "state": "reload",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["draft", "request_id", "semantic_decision", "confirmation", "closure_or_batch"],
+        "recovery": "re-read both heads, compact state, and exact subject before new judgment"
+      }
+    },
+    {
+      "id": "unknown-binding",
+      "input": {
+        "read_shape": "supported_literal",
+        "heads": "current",
+        "binding": "unknown",
+        "wrapper": "canonical",
+        "structural_context": "exact",
+        "subject_context": "exact",
+        "review_closure": "complete",
+        "artifact_integrity": "verified",
+        "wait_admission": "complete",
+        "context_freshness": "fresh"
+      },
+      "expected": {
+        "state": "unknown",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["draft", "request_id", "remembered_binding"],
+        "recovery": "run standalone discovery or doctor and initialize only after explicit activation plus definitive absent binding"
+      }
+    },
+    {
+      "id": "wrong-wrapper",
+      "input": {
+        "read_shape": "supported_literal",
+        "heads": "current",
+        "binding": "definitive",
+        "wrapper": "wrong",
+        "structural_context": "exact",
+        "subject_context": "exact",
+        "review_closure": "complete",
+        "artifact_integrity": "verified",
+        "wait_admission": "complete",
+        "context_freshness": "fresh"
+      },
+      "expected": {
+        "state": "reload",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["complete_command", "request_id"],
+        "recovery": "select the canonical transition template and rebuild every field"
+      }
+    },
+    {
+      "id": "missing-structural-context",
+      "input": {
+        "read_shape": "supported_literal",
+        "heads": "current",
+        "binding": "definitive",
+        "wrapper": "canonical",
+        "structural_context": "missing",
+        "subject_context": "exact",
+        "review_closure": "complete",
+        "artifact_integrity": "verified",
+        "wait_admission": "complete",
+        "context_freshness": "fresh"
+      },
+      "expected": {
+        "state": "seeking_route",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["route_draft", "request_id"],
+        "recovery": "copy exact StructuralContext from the current typed Stage contract and dependencies"
+      }
+    },
+    {
+      "id": "subject-context-miscopy",
+      "input": {
+        "read_shape": "supported_literal",
+        "heads": "current",
+        "binding": "definitive",
+        "wrapper": "canonical",
+        "structural_context": "exact",
+        "subject_context": "miscopied",
+        "review_closure": "complete",
+        "artifact_integrity": "verified",
+        "wait_admission": "complete",
+        "context_freshness": "fresh"
+      },
+      "expected": {
+        "state": "reload",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["draft", "request_id", "semantic_decision"],
+        "recovery": "read the exact current object and copy typed subject and Context anew"
+      }
+    },
+    {
+      "id": "review-closure-missing",
+      "input": {
+        "read_shape": "supported_literal",
+        "heads": "current",
+        "binding": "definitive",
+        "wrapper": "canonical",
+        "structural_context": "exact",
+        "subject_context": "exact",
+        "review_closure": "incomplete",
+        "artifact_integrity": "verified",
+        "wait_admission": "complete",
+        "context_freshness": "fresh"
+      },
+      "expected": {
+        "state": "reviewing",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["review_closure", "decision_draft", "request_id"],
+        "recovery": "restart recursive exact-identity closure from the current Packet"
+      }
+    },
+    {
+      "id": "artifact-mismatch",
+      "input": {
+        "read_shape": "supported_literal",
+        "heads": "current",
+        "binding": "definitive",
+        "wrapper": "canonical",
+        "structural_context": "exact",
+        "subject_context": "exact",
+        "review_closure": "complete",
+        "artifact_integrity": "mismatched",
+        "wait_admission": "complete",
+        "context_freshness": "fresh"
+      },
+      "expected": {
+        "state": "reviewing",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["review_closure", "decision_draft", "request_id"],
+        "recovery": "report degraded integrity and restore the exact bytes through explicit trusted recovery"
+      }
+    },
+    {
+      "id": "wait-over-budget",
+      "input": {
+        "read_shape": "supported_literal",
+        "heads": "current",
+        "binding": "definitive",
+        "wrapper": "canonical",
+        "structural_context": "exact",
+        "subject_context": "exact",
+        "review_closure": "complete",
+        "artifact_integrity": "verified",
+        "wait_admission": "over_budget",
+        "context_freshness": "fresh"
+      },
+      "expected": {
+        "state": "waiting",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["wait_batch", "judgment_draft", "request_id"],
+        "recovery": "retain summary only and wait for a complete same-snapshot admitted set"
+      }
+    },
+    {
+      "id": "compaction-rebuild",
+      "input": {
+        "read_shape": "supported_literal",
+        "heads": "current",
+        "binding": "definitive",
+        "wrapper": "canonical",
+        "structural_context": "exact",
+        "subject_context": "exact",
+        "review_closure": "complete",
+        "artifact_integrity": "verified",
+        "wait_admission": "complete",
+        "context_freshness": "remembered"
+      },
+      "expected": {
+        "state": "reload",
+        "fence": "closed",
+        "mutation": "blocked",
+        "discard": ["remembered_heads", "remembered_paths", "draft", "request_id", "closure_or_batch"],
+        "recovery": "reload the Skill and host card, then read live state and its one state-specific recipe"
+      }
+    }
+  ]
+}

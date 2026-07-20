@@ -1,0 +1,220 @@
+{
+  "schema": "mobius.proof-impact-fixture.v1",
+  "boundary": {
+    "test_only": true,
+    "deterministic": true,
+    "runtime_parser": false,
+    "core_state": false,
+    "production_api": false,
+    "persistence": false,
+    "ledger": false,
+    "business_transition": false,
+    "business_fact": false
+  },
+  "scenarios": [
+    {
+      "id": "s3-lease-timing-token-change",
+      "accepted_proof": {
+        "decision_id": "decision-s3-lease-accepted",
+        "decision_state": "accepted",
+        "owning_stage": "S3",
+        "frozen_scope": ["lease-timing", "lease-token"],
+        "dependencies": ["lease-clock", "lease-storage"]
+      },
+      "context": {
+        "objective_state": "navigating",
+        "current_stage": "S5"
+      },
+      "change": {
+        "surfaces": ["lease-timing", "lease-token"],
+        "affected_dependencies": ["lease-clock"],
+        "scope_knowledge": "complete",
+        "dependency_knowledge": "complete",
+        "identity_knowledge": "complete",
+        "ownership": "unchanged",
+        "material_kinds": ["lease_concurrency"],
+        "semantic_change": "none"
+      },
+      "expected": {
+        "disposition": "needs_reverification",
+        "lifecycle": {
+          "action": "request_remap_reverify",
+          "transition_intent": "request_remap",
+          "proof_carry": "invalidate_affected_and_transitive",
+          "map_handling": "install_revision_same_structure",
+          "terminal_follow_up": "none"
+        }
+      }
+    },
+    {
+      "id": "s3-symlink-security-boundary-change",
+      "accepted_proof": {
+        "decision_id": "decision-s3-containment-accepted",
+        "decision_state": "accepted",
+        "owning_stage": "S3",
+        "frozen_scope": ["project-root-containment", "symlink-policy"],
+        "dependencies": ["filesystem-boundary"]
+      },
+      "context": {
+        "objective_state": "navigating",
+        "current_stage": "S5"
+      },
+      "change": {
+        "surfaces": ["project-root-containment", "symlink-policy"],
+        "affected_dependencies": ["filesystem-boundary"],
+        "scope_knowledge": "complete",
+        "dependency_knowledge": "complete",
+        "identity_knowledge": "complete",
+        "ownership": "unchanged",
+        "material_kinds": ["filesystem_security"],
+        "semantic_change": "acceptance_understanding"
+      },
+      "expected": {
+        "disposition": "requires_remap",
+        "lifecycle": {
+          "action": "request_remap_revise_and_reverify",
+          "transition_intent": "request_remap",
+          "proof_carry": "only_explicitly_valid",
+          "map_handling": "revise_structure_before_install",
+          "terminal_follow_up": "none"
+        }
+      }
+    },
+    {
+      "id": "s4-migration-bootstrap-ownership-change",
+      "accepted_proof": {
+        "decision_id": "decision-s4-bootstrap-accepted",
+        "decision_state": "accepted",
+        "owning_stage": "S4",
+        "frozen_scope": ["migration-bootstrap-ownership"],
+        "dependencies": ["bootstrap-layout"]
+      },
+      "context": {
+        "objective_state": "navigating",
+        "current_stage": "S5"
+      },
+      "change": {
+        "surfaces": ["migration-bootstrap-ownership"],
+        "affected_dependencies": ["bootstrap-layout"],
+        "scope_knowledge": "complete",
+        "dependency_knowledge": "complete",
+        "identity_knowledge": "complete",
+        "ownership": "implementation_changed",
+        "material_kinds": ["migration_bootstrap"],
+        "semantic_change": "none"
+      },
+      "expected": {
+        "disposition": "needs_reverification",
+        "lifecycle": {
+          "action": "request_remap_reverify",
+          "transition_intent": "request_remap",
+          "proof_carry": "invalidate_affected_and_transitive",
+          "map_handling": "install_revision_same_structure",
+          "terminal_follow_up": "none"
+        }
+      }
+    },
+    {
+      "id": "s5-exclusive-docs-proven-disjoint",
+      "accepted_proof": {
+        "decision_id": "decision-s3-runtime-accepted",
+        "decision_state": "accepted",
+        "owning_stage": "S3",
+        "frozen_scope": ["lease-runtime"],
+        "dependencies": ["runtime-configuration"]
+      },
+      "context": {
+        "objective_state": "navigating",
+        "current_stage": "S5"
+      },
+      "change": {
+        "surfaces": ["s5-exclusive-documentation"],
+        "affected_dependencies": [],
+        "scope_knowledge": "complete",
+        "dependency_knowledge": "complete",
+        "identity_knowledge": "complete",
+        "ownership": "unchanged",
+        "material_kinds": ["documentation"],
+        "semantic_change": "none"
+      },
+      "expected": {
+        "disposition": "unaffected",
+        "lifecycle": {
+          "action": "continue_without_remap",
+          "transition_intent": "none",
+          "proof_carry": "no_operation",
+          "map_handling": "no_operation",
+          "terminal_follow_up": "none"
+        }
+      }
+    },
+    {
+      "id": "incomplete-ownership-scope-fails-closed",
+      "accepted_proof": {
+        "decision_id": "decision-s4-scope-accepted",
+        "decision_state": "accepted",
+        "owning_stage": "S4",
+        "frozen_scope": ["bootstrap-surface"],
+        "dependencies": ["migration-owner"]
+      },
+      "context": {
+        "objective_state": "navigating",
+        "current_stage": "S5"
+      },
+      "change": {
+        "surfaces": ["shared-bootstrap-surface"],
+        "affected_dependencies": [],
+        "scope_knowledge": "incomplete",
+        "dependency_knowledge": "incomplete",
+        "identity_knowledge": "complete",
+        "ownership": "incomplete",
+        "material_kinds": ["migration_bootstrap"],
+        "semantic_change": "none"
+      },
+      "expected": {
+        "disposition": "unknown",
+        "lifecycle": {
+          "action": "request_remap_fail_closed",
+          "transition_intent": "request_remap",
+          "proof_carry": "only_explicitly_valid",
+          "map_handling": "reassess_before_install",
+          "terminal_follow_up": "none"
+        }
+      }
+    },
+    {
+      "id": "achieved-late-lease-defect",
+      "accepted_proof": {
+        "decision_id": "decision-s3-terminal-accepted",
+        "decision_state": "accepted",
+        "owning_stage": "S3",
+        "frozen_scope": ["lease-timing", "lease-token"],
+        "dependencies": ["lease-clock"]
+      },
+      "context": {
+        "objective_state": "achieved",
+        "current_stage": null
+      },
+      "change": {
+        "surfaces": ["lease-timing", "lease-token"],
+        "affected_dependencies": ["lease-clock"],
+        "scope_knowledge": "complete",
+        "dependency_knowledge": "complete",
+        "identity_knowledge": "complete",
+        "ownership": "unchanged",
+        "material_kinds": ["lease_concurrency"],
+        "semantic_change": "none"
+      },
+      "expected": {
+        "disposition": "needs_reverification",
+        "lifecycle": {
+          "action": "report_audit_finding_or_new_objective",
+          "transition_intent": "none",
+          "proof_carry": "no_operation",
+          "map_handling": "no_operation",
+          "terminal_follow_up": "audit_finding_or_user_authorized_new_objective"
+        }
+      }
+    }
+  ]
+}

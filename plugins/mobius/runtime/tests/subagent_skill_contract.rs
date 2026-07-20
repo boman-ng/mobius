@@ -370,6 +370,9 @@ fn judge_gate_closes_freeze_and_coverage_bypasses() {
             "| `partial` | `inconclusive` | `inconclusive` |",
             "| `unverifiable` | `inconclusive` | `inconclusive` |",
             "Findings and recommendations cannot bypass the gate.",
+            "Treat every listed status, assessment, and severity alternative as a closed enum.",
+            "Missing, extra,",
+            "cross-inventory references make the result invalid",
             "Keep all outputs advisory.",
         ],
     );
