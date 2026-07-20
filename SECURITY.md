@@ -6,7 +6,7 @@ narrow lifecycle hooks to protect Core-owned state and completion claims.
 
 ## Supported Versions
 
-Security fixes are accepted for v1.2.2 and the default branch. The checked-in source marketplace
+Security fixes are accepted for v1.3.0 and the default branch. The checked-in source marketplace
 remains unavailable because it does not contain the release executable; use the checksummed GitHub
 release bundle.
 
