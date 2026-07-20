@@ -1,0 +1,633 @@
+{
+  "schema": "mobius.session-audit-fixture.v1",
+  "authority": {
+    "business_facts": "trail",
+    "runtime_scope": "execution_observation_only"
+  },
+  "input": {
+    "schema": "mobius.session-audit-input.v1",
+    "adapter_id": "synthetic.runtime-export.v1",
+    "source_schema": {
+      "version_or_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "session_locator": "synthetic://authorized/session-a",
+    "objective_id": "objective-synthetic-audit",
+    "redaction_profile": "mobius.session-audit-redaction.v1",
+    "bounds": {
+      "max_input_bytes": 262144,
+      "max_records": 128,
+      "max_agents": 4,
+      "max_result_bytes": 65536
+    }
+  },
+  "source_binding": {
+    "project_id": "project-synthetic-audit",
+    "objective_id": "objective-synthetic-audit"
+  },
+  "session_label_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "runtime_observations": [
+    {
+      "order": 1,
+      "kind": "project_init",
+      "tool": "mobius_project_init",
+      "request_id": "init-1",
+      "payload_digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
+      "heads": [0, 0],
+      "result": "accepted"
+    },
+    {
+      "order": 2,
+      "kind": "project_init",
+      "tool": "mobius_project_init",
+      "request_id": "init-1",
+      "payload_digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
+      "heads": [0, 0],
+      "result": "idempotent_noop",
+      "fault_class": "duplicate_project_init"
+    },
+    {
+      "order": 3,
+      "kind": "read_failure",
+      "result": "invalid",
+      "fault_class": "sqlite_matcher"
+    },
+    {
+      "order": 4,
+      "kind": "mutation_attempt",
+      "tool": "mobius_apply_transition",
+      "request_id": "bad-decision-wrapper",
+      "payload_digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
+      "heads": [4, 4],
+      "result": "invalid_tool_input",
+      "fault_class": "decision_wrapper"
+    },
+    {
+      "order": 5,
+      "kind": "mutation_attempt",
+      "tool": "mobius_apply_transition",
+      "request_id": "route-without-context",
+      "payload_digest": "sha256:0303030303030303030303030303030303030303030303030303030303030303",
+      "heads": [2, 2],
+      "result": "invalid_tool_input",
+      "fault_class": "missing_structural_context"
+    },
+    {
+      "order": 6,
+      "kind": "mutation_attempt",
+      "tool": "mobius_apply_transition",
+      "request_id": "guessed-heads",
+      "payload_digest": "sha256:0404040404040404040404040404040404040404040404040404040404040404",
+      "heads": [0, 0],
+      "result": "stale_head"
+    },
+    {
+      "order": 7,
+      "kind": "mutation_attempt",
+      "tool": "mobius_apply_transition",
+      "request_id": "record-evidence-s5",
+      "payload_digest": "sha256:0606060606060606060606060606060606060606060606060606060606060606",
+      "heads": [29, 29],
+      "result": "accepted",
+      "typed_identity": {
+        "objective_id": "objective-synthetic-audit",
+        "transition": "record_evidence",
+        "object_kind": "evidence",
+        "object_id": "evidence-s5-verifier"
+      },
+      "receipt_event_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    {
+      "order": 8,
+      "kind": "mutation_attempt",
+      "tool": "mobius_apply_transition",
+      "request_id": "decision-s5",
+      "payload_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+      "heads": [31, 31],
+      "result": "accepted",
+      "typed_identity": {
+        "objective_id": "objective-synthetic-audit",
+        "transition": "decision",
+        "object_kind": "review_decision",
+        "object_id": "review-decision-s5"
+      },
+      "receipt_event_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+    }
+  ],
+  "trail": {
+    "prefix": ["activate_objective", "install_map"],
+    "stage_cycles": [
+      {
+        "stage": "S1",
+        "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+        "decision": "accept",
+        "evidence_baseline": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "snapshot_identity": "snapshot-s1",
+        "claims": ["criterion-s1"],
+        "freshness": "fresh"
+      },
+      {
+        "stage": "S2",
+        "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+        "decision": "accept",
+        "evidence_baseline": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "snapshot_identity": "snapshot-s2",
+        "claims": ["criterion-s2"],
+        "freshness": "fresh"
+      },
+      {
+        "stage": "S3",
+        "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+        "decision": "accept",
+        "evidence_baseline": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "snapshot_identity": "snapshot-s3",
+        "claims": ["criterion-s3"],
+        "freshness": "fresh"
+      },
+      {
+        "stage": "S4",
+        "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+        "decision": "accept",
+        "evidence_baseline": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "snapshot_identity": "snapshot-s4",
+        "claims": ["criterion-s4"],
+        "freshness": "fresh"
+      },
+      {
+        "stage": "S5",
+        "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+        "decision": "accept",
+        "evidence_baseline": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "snapshot_identity": "snapshot-s5",
+        "claims": ["criterion-s5"],
+        "freshness": "fresh"
+      }
+    ],
+    "identities": [
+      {
+        "order": 30,
+        "request_id": "record-evidence-s5",
+        "typed_identity": {
+          "objective_id": "objective-synthetic-audit",
+          "transition": "record_evidence",
+          "object_kind": "evidence",
+          "object_id": "evidence-s5-verifier"
+        },
+        "event_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      {
+        "order": 32,
+        "request_id": "decision-s5",
+        "typed_identity": {
+          "objective_id": "objective-synthetic-audit",
+          "transition": "decision",
+          "object_kind": "review_decision",
+          "object_id": "review-decision-s5"
+        },
+        "event_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+      }
+    ],
+    "projected_final_state": "achieved"
+  },
+  "subagents": [
+    {
+      "opaque_task": "task-verifier-a",
+      "role": "verifier",
+      "stage": "S5",
+      "task_baseline": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "spawn_status": "completed",
+      "final_status": "completed",
+      "close_status": "completed",
+      "effects": ["verification_result_observed"],
+      "consumed_before": "record_evidence",
+      "timing": {
+        "relative_to_attempt": "after_start_attempt",
+        "relative_to_seal": "before_seal_attempt",
+        "relative_to_review": "before_decision"
+      }
+    },
+    {
+      "opaque_task": "task-verifier-b",
+      "role": "verifier",
+      "stage": "S5",
+      "task_baseline": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "spawn_status": "completed",
+      "final_status": "completed",
+      "close_status": "completed",
+      "effects": ["verification_result_observed"],
+      "consumed_before": "record_evidence",
+      "timing": {
+        "relative_to_attempt": "after_start_attempt",
+        "relative_to_seal": "before_seal_attempt",
+        "relative_to_review": "before_decision"
+      }
+    }
+  ],
+  "judge": {
+    "status": "absent",
+    "reason": "no Stage Judge task or native final result exists in the synthetic source"
+  },
+  "completion": {
+    "authority": "trail",
+    "objective_state": "achieved",
+    "audit": "healthy",
+    "marker": "present"
+  },
+  "expected_output": {
+    "schema": "mobius.session-audit-output.v1",
+    "session_label_digest": {
+      "local_id": "digest-session-label",
+      "display": "sha256:…bbbbbbb"
+    },
+    "binding": {
+      "project_id": "project-synthetic-audit",
+      "objective_id": "objective-synthetic-audit"
+    },
+    "mutation_attempts": {
+      "bounds": {
+        "max_records": 128,
+        "observed_records": 8,
+        "emitted_attempts": 7,
+        "truncated": false
+      },
+      "counts": {
+        "stale_head_rejections": 1,
+        "malformed_fault_classes": ["sqlite_matcher", "decision_wrapper", "missing_structural_context"],
+        "duplicate_init_noops": 1
+      },
+      "items": [
+        {
+          "runtime_record_id": "runtime-01",
+          "order": 1,
+          "kind": "project_init",
+          "tool": "mobius_project_init",
+          "request_id": "init-1",
+          "payload_digest": {
+            "local_id": "digest-payload-runtime-01",
+            "display": "sha256:…1010101"
+          },
+          "heads": {"project_seq": 0, "objective_seq": 0},
+          "result": {"classification": "accepted", "detail": "accepted"},
+          "fault_class": null
+        },
+        {
+          "runtime_record_id": "runtime-02",
+          "order": 2,
+          "kind": "project_init",
+          "tool": "mobius_project_init",
+          "request_id": "init-1",
+          "payload_digest": {
+            "local_id": "digest-payload-runtime-01",
+            "display": "sha256:…1010101"
+          },
+          "heads": {"project_seq": 0, "objective_seq": 0},
+          "result": {"classification": "no_op", "detail": "idempotent_noop"},
+          "fault_class": "duplicate_project_init"
+        },
+        {
+          "runtime_record_id": "runtime-04",
+          "order": 4,
+          "kind": "mutation_attempt",
+          "tool": "mobius_apply_transition",
+          "request_id": "bad-decision-wrapper",
+          "payload_digest": {
+            "local_id": "digest-payload-runtime-04",
+            "display": "sha256:…2020202"
+          },
+          "heads": {"project_seq": 4, "objective_seq": 4},
+          "result": {"classification": "invalid", "detail": "invalid_tool_input"},
+          "fault_class": "decision_wrapper"
+        },
+        {
+          "runtime_record_id": "runtime-05",
+          "order": 5,
+          "kind": "mutation_attempt",
+          "tool": "mobius_apply_transition",
+          "request_id": "route-without-context",
+          "payload_digest": {
+            "local_id": "digest-payload-runtime-05",
+            "display": "sha256:…3030303"
+          },
+          "heads": {"project_seq": 2, "objective_seq": 2},
+          "result": {"classification": "invalid", "detail": "invalid_tool_input"},
+          "fault_class": "missing_structural_context"
+        },
+        {
+          "runtime_record_id": "runtime-06",
+          "order": 6,
+          "kind": "mutation_attempt",
+          "tool": "mobius_apply_transition",
+          "request_id": "guessed-heads",
+          "payload_digest": {
+            "local_id": "digest-payload-runtime-06",
+            "display": "sha256:…4040404"
+          },
+          "heads": {"project_seq": 0, "objective_seq": 0},
+          "result": {"classification": "rejected", "detail": "stale_head"},
+          "fault_class": null
+        },
+        {
+          "runtime_record_id": "runtime-07",
+          "order": 7,
+          "kind": "mutation_attempt",
+          "tool": "mobius_apply_transition",
+          "request_id": "record-evidence-s5",
+          "payload_digest": {
+            "local_id": "digest-payload-runtime-07",
+            "display": "sha256:…6060606"
+          },
+          "heads": {"project_seq": 29, "objective_seq": 29},
+          "result": {"classification": "accepted", "detail": "accepted"},
+          "fault_class": null
+        },
+        {
+          "runtime_record_id": "runtime-08",
+          "order": 8,
+          "kind": "mutation_attempt",
+          "tool": "mobius_apply_transition",
+          "request_id": "decision-s5",
+          "payload_digest": {
+            "local_id": "digest-payload-runtime-08",
+            "display": "sha256:…7070707"
+          },
+          "heads": {"project_seq": 31, "objective_seq": 31},
+          "result": {"classification": "accepted", "detail": "accepted"},
+          "fault_class": null
+        }
+      ]
+    },
+    "correlations": {
+      "matched": [
+        {
+          "correlation_id": "correlation-matched-01",
+          "classification": "matched",
+          "runtime_record_id": "runtime-07",
+          "trail_record_id": "trail-30",
+          "request_id": "record-evidence-s5",
+          "typed_identity": {
+            "objective_id": "objective-synthetic-audit",
+            "transition": "record_evidence",
+            "object_kind": "evidence",
+            "object_id": "evidence-s5-verifier"
+          },
+          "event_digest": {
+            "local_id": "digest-event-runtime-07",
+            "display": "sha256:…7777777"
+          },
+          "reason": null
+        }
+      ],
+      "unknown": [
+        {
+          "correlation_id": "correlation-unknown-runtime-01",
+          "classification": "unknown",
+          "runtime_record_id": "runtime-08",
+          "trail_record_id": null,
+          "request_id": "decision-s5",
+          "typed_identity": {
+            "objective_id": "objective-synthetic-audit",
+            "transition": "decision",
+            "object_kind": "review_decision",
+            "object_id": "review-decision-s5"
+          },
+          "event_digest": {
+            "local_id": "digest-event-runtime-08",
+            "display": "sha256:…8888888"
+          },
+          "reason": "no_exact_trail_identity"
+        },
+        {
+          "correlation_id": "correlation-unknown-trail-01",
+          "classification": "unknown",
+          "runtime_record_id": null,
+          "trail_record_id": "trail-32",
+          "request_id": "decision-s5",
+          "typed_identity": {
+            "objective_id": "objective-synthetic-audit",
+            "transition": "decision",
+            "object_kind": "review_decision",
+            "object_id": "review-decision-s5"
+          },
+          "event_digest": {
+            "local_id": "digest-event-trail-32",
+            "display": "sha256:…9999999"
+          },
+          "reason": "no_exact_runtime_identity"
+        }
+      ]
+    },
+    "trail_summary": {
+      "authority": "trail",
+      "accepted_order": {
+        "prefix": ["activate_objective", "install_map"],
+        "stage_cycles": [
+          {
+            "stage": "S1",
+            "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+            "decision": "accept"
+          },
+          {
+            "stage": "S2",
+            "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+            "decision": "accept"
+          },
+          {
+            "stage": "S3",
+            "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+            "decision": "accept"
+          },
+          {
+            "stage": "S4",
+            "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+            "decision": "accept"
+          },
+          {
+            "stage": "S5",
+            "transitions": ["add_route", "select_route", "start_attempt", "record_evidence", "seal_attempt", "decision"],
+            "decision": "accept"
+          }
+        ]
+      },
+      "evidence": [
+        {
+          "stage": "S1",
+          "baseline_digest": {"local_id": "digest-evidence-S1", "display": "sha256:…1111111"},
+          "snapshot_identity": "snapshot-s1",
+          "claims": ["criterion-s1"],
+          "freshness": "fresh"
+        },
+        {
+          "stage": "S2",
+          "baseline_digest": {"local_id": "digest-evidence-S2", "display": "sha256:…2222222"},
+          "snapshot_identity": "snapshot-s2",
+          "claims": ["criterion-s2"],
+          "freshness": "fresh"
+        },
+        {
+          "stage": "S3",
+          "baseline_digest": {"local_id": "digest-evidence-S3", "display": "sha256:…3333333"},
+          "snapshot_identity": "snapshot-s3",
+          "claims": ["criterion-s3"],
+          "freshness": "fresh"
+        },
+        {
+          "stage": "S4",
+          "baseline_digest": {"local_id": "digest-evidence-S4", "display": "sha256:…4444444"},
+          "snapshot_identity": "snapshot-s4",
+          "claims": ["criterion-s4"],
+          "freshness": "fresh"
+        },
+        {
+          "stage": "S5",
+          "baseline_digest": {"local_id": "digest-evidence-S5", "display": "sha256:…5555555"},
+          "snapshot_identity": "snapshot-s5",
+          "claims": ["criterion-s5"],
+          "freshness": "fresh"
+        }
+      ],
+      "projected_final_state": "achieved"
+    },
+    "lifecycle_summary": {
+      "accepted_stage_cycles": 5,
+      "role_timing": {
+        "driver": {
+          "count": 0,
+          "status": "absent",
+          "relative_to_attempt": "absent",
+          "relative_to_seal": "absent",
+          "relative_to_review": "absent"
+        },
+        "verifier": {
+          "count": 2,
+          "status": "observed",
+          "relative_to_attempt": "after_start_attempt",
+          "relative_to_seal": "before_seal_attempt",
+          "relative_to_review": "before_decision"
+        },
+        "judge": {
+          "count": 0,
+          "status": "absent",
+          "relative_to_attempt": "absent",
+          "relative_to_seal": "absent",
+          "relative_to_review": "absent"
+        }
+      }
+    },
+    "subagent_summary": {
+      "counts": {
+        "verifiers_by_stage": {"S1": 0, "S2": 0, "S3": 0, "S4": 0, "S5": 2},
+        "drivers": 0,
+        "stage_judges": 0
+      },
+      "tasks": [
+        {
+          "task_id": "task-verifier-a",
+          "role": "verifier",
+          "stage": "S5",
+          "task_baseline": {
+            "local_id": "digest-baseline-task-verifier-a",
+            "display": "sha256:…ccccccc"
+          },
+          "spawn_status": "completed",
+          "final_status": "completed",
+          "close_status": "completed",
+          "effects": ["verification_result_observed"],
+          "consumed_before": "record_evidence"
+        },
+        {
+          "task_id": "task-verifier-b",
+          "role": "verifier",
+          "stage": "S5",
+          "task_baseline": {
+            "local_id": "digest-baseline-task-verifier-b",
+            "display": "sha256:…ddddddd"
+          },
+          "spawn_status": "completed",
+          "final_status": "completed",
+          "close_status": "completed",
+          "effects": ["verification_result_observed"],
+          "consumed_before": "record_evidence"
+        }
+      ]
+    },
+    "judge_summary": {
+      "status": "absent",
+      "reason": "no Stage Judge task or native final result exists in the synthetic source"
+    },
+    "agent_path_conformance": {
+      "status": "nonconformant",
+      "rule": "one_fresh_complete_judge_before_each_stage_review_decision",
+      "required_stage_reviews": 5,
+      "observed_stage_judges": 0,
+      "missing_judge_stages": ["S1", "S2", "S3", "S4", "S5"]
+    },
+    "completion_summary": {
+      "authority": "trail",
+      "objective_state": "achieved",
+      "audit": "healthy",
+      "marker": "present"
+    },
+    "deviations": [
+      {
+        "subject_ref": "runtime-02",
+        "code": "duplicate_project_init",
+        "classification": "runtime_observation"
+      },
+      {
+        "subject_ref": "runtime-03",
+        "code": "sqlite_matcher",
+        "classification": "runtime_observation"
+      },
+      {
+        "subject_ref": "runtime-04",
+        "code": "decision_wrapper",
+        "classification": "runtime_observation"
+      },
+      {
+        "subject_ref": "runtime-05",
+        "code": "missing_structural_context",
+        "classification": "runtime_observation"
+      },
+      {
+        "subject_ref": "runtime-06",
+        "code": "stale_head",
+        "classification": "runtime_observation"
+      },
+      {
+        "subject_ref": "runtime-08",
+        "code": "unresolved_runtime_trail_identity",
+        "classification": "unknown"
+      },
+      {
+        "subject_ref": "stage:S1",
+        "code": "missing_required_stage_judge",
+        "classification": "agent_path_nonconformance"
+      },
+      {
+        "subject_ref": "stage:S2",
+        "code": "missing_required_stage_judge",
+        "classification": "agent_path_nonconformance"
+      },
+      {
+        "subject_ref": "stage:S3",
+        "code": "missing_required_stage_judge",
+        "classification": "agent_path_nonconformance"
+      },
+      {
+        "subject_ref": "stage:S4",
+        "code": "missing_required_stage_judge",
+        "classification": "agent_path_nonconformance"
+      },
+      {
+        "subject_ref": "stage:S5",
+        "code": "missing_required_stage_judge",
+        "classification": "agent_path_nonconformance"
+      }
+    ],
+    "unresolved_links": ["correlation-unknown-runtime-01", "correlation-unknown-trail-01"],
+    "residual_risks": [
+      {"code": "unresolved_runtime_observation", "status": "open", "count": 1},
+      {"code": "unresolved_trail_identity", "status": "open", "count": 1},
+      {"code": "missing_required_stage_judge", "status": "open", "count": 5}
+    ]
+  }
+}
