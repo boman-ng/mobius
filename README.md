@@ -45,11 +45,27 @@ The authoritative blueprints are:
 The active tree contains one Cargo package with one `mobius` binary target, the
 `mobius-copilot` and `mobius-loop` Model skills, the independent Subagent skill, project-bound
 SQLite and artifact stores, the Core service, public stdio MCP, read-only operational CLI modes,
-context-dark reports, and narrow hooks. Direct and delegated Composition loops are tested through
-the real MCP process with read-only SQLite observation; the delegated lane keeps worker output
-candidate-only and lets only main construct typed Core input. The authoritative blueprints define
+context-dark reports, and narrow hooks. Direct-work and delegated-candidate Core transport lanes
+are tested through the real MCP process with read-only SQLite observation; the delegated lane keeps
+worker output candidate-only and lets only main construct typed Core input. A conformant
+Composition path additionally performs the required Judge ritual in every Stage Review. The authoritative blueprints define
 the implementation boundary; `docs/release-checklist.md`, CI, and each GitHub release record the
 verification and supported-host boundary.
+
+For mutable work products, the Loop freezes a canonical Evidence Bundle in the existing
+CoreSnapshot path and checks it before RecordEvidence, SealAttempt, and Decision. Later effects that
+touch accepted proof use the existing RequestRemap and carry lifecycle; historical Evidence and
+Packets stay immutable and complete. Driver and Verifier remain optional tools selected for
+information value and independent failure-model coverage. Every Stage Review runs one fresh
+required Judge after recursive closure and material freeze; its advice is necessary but never
+sufficient for `accept`, never a vote, and never a new Core state. Judge consumption follows the
+generic native Subagent envelope and Runtime-advertised profiles; the installed Mobius contract
+does not assume a named review skill, provider, or private parser.
+
+Machine identity and Agent display are separate. Capture, freeze, artifact, Core, Trail, equality,
+and integrity checks retain complete SHA-256 values. Once checked, repeated Agent context uses
+task-local semantic ids and may show only the last seven hex characters as a display hint; that
+suffix never performs lookup, equality, or admission.
 
 `mobius-copilot` exclusively manages human-authorized Objective activation, revision,
 abandonment, and the initial or specification-revision Map those actions require. It clarifies the
@@ -95,8 +111,9 @@ downloaders, and helper executables. The host SQLite prerequisite is deliberatel
 CI copies the assembled plugin into an isolated Codex-style cache and starts both `--help` and the
 stdio MCP initialize handshake with an empty environment. The release-host gate admits stable
 Codex CLI versions `>=0.143.0`, verifies the external SQLite prerequisite, installs the marketplace
-through the actual host, verifies the resolved cache command and cwd, and runs complete direct and
-delegated MCP-write/SQLite-read loops to `Achieved`. The minimum version is an admission floor;
+through the actual host, verifies the resolved cache command and cwd, and runs direct-work and
+delegated-candidate MCP-write/SQLite-read Core lanes to `Achieved`. Full Composition release
+evidence additionally requires a fresh native Judge before each Stage `accept`. The minimum version is an admission floor;
 every actual release host must pass the full gate. The checked-in marketplace stays unavailable;
 only the assembled copy is marked `AVAILABLE`.
 
