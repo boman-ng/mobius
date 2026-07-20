@@ -393,3 +393,10 @@ Apply this gate without exception:
 | Freeze unverifiable or material inaccessible | `unverifiable` | `inconclusive` | `inconclusive` |
 
 Only matched materials with complete required coverage may support a determinate answer or assessment. Auxiliary background cannot expand the evidence set. Findings and recommendations cannot bypass the gate. If any question, criterion, or known risk is inconclusive because necessary material is incomplete, make the overall disposition `inconclusive`. Keep all outputs advisory.
+
+Treat every listed status, assessment, and severity alternative as a closed enum. Close every
+material, question, criterion, supplied risk, and corresponding result by one unique task-local ID.
+Every finding criterion/material/evidence reference and every recommendation or common-envelope
+artifact/evidence reference must resolve to the current task-local inventory. Missing, extra,
+duplicate, unknown, or cross-inventory references make the result invalid; prose or disposition
+cannot repair them.
